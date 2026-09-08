@@ -61,4 +61,11 @@ class CloudControllerTest {
     mvc.perform(delete("/api/v1/whitelist/粤B88888"))
       .andExpect(status().isOk()).andExpect(jsonPath("$.removed").value(true));
   }
+
+  @Test void exportsViolationEventsAsCsv() throws Exception {
+    mvc.perform(get("/api/v1/events/export"))
+      .andExpect(status().isOk())
+      .andExpect(header().string("Content-Disposition", "attachment; filename=violation_ledger.csv"))
+      .andExpect(content().contentTypeCompatibleWith("text/csv"));
+  }
 }

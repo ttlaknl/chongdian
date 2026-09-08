@@ -13,5 +13,11 @@ class CloudStoreTest {
     store.heartbeat("edge-01");
     assertEquals("A-02", store.events().getFirst().spaceId());
     assertTrue(store.heartbeats().containsKey("edge-01"));
+
+    String csv = store.exportEventsCsv(null, null, null);
+    assertTrue(csv.contains("事件ID,车位编号,车牌号码"));
+    assertTrue(csv.contains("粤A12345"));
+    assertTrue(csv.contains("燃油车"));
+    assertTrue(csv.contains("燃油车占用充电位"));
   }
 }

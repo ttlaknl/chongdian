@@ -78,6 +78,51 @@ public class CloudStore {
         .toList();
   }
 
+  public String exportEventsCsv(String spaceId, String plate, String violationType) {
+    List<ViolationEvent> list = filterEvents(spaceId, plate, violationType);
+    StringBuilder sb = new StringBuilder();
+    sb.append('\uFEFF');
+    sb.append("事件ID,车位编号,车牌号码,车辆类型,违规类型,发生时间,证据图片链接\n");
+    for (ViolationEvent ev : list) {
+      sb.append(escapeCsv(ev.eventId() == null ? "" : ev.eventId().toString())).append(",");
+      sb.append(escapeCsv(ev.spaceId())).append(",");
+      sb.append(escapeCsv(ev.plate())).append(",");
+      sb.append(escapeCsv(mapVehicleType(ev.vehicleType()))).append(",");
+      sb.append(escapeCsv(mapViolationType(ev.violationType()))).append(",");
+      sb.append(escapeCsv(ev.occurredAt() == null ? "" : ev.occurredAt().toString())).append(",");
+      sb.append(escapeCsv(ev.evidenceUrl())).append("\n");
+    }
+    return sb.toString();
+  }
+
+  private String mapVehicleType(String type) {
+    if (type == null) return "未知";
+    return switch (type) {
+      case "FUEL" -> "燃油车";
+      case "NEW_ENERGY" -> "新能源车";
+      default -> type;
+    };
+  }
+
+  private String mapViolationType(String type) {
+    if (type == null) return "未知违规";
+    return switch (type) {
+      case "FUEL_VEHICLE" -> "燃油车占用充电位";
+      case "NOT_CHARGING_OVERTIME" -> "新能源车超时未充电";
+      case "CHARGE_COMPLETED_OVERTIME" -> "充电完成超时滞留";
+      case "CHARGER_STATUS_UNAVAILABLE" -> "充电桩离线滞留";
+      default -> type;
+    };
+  }
+
+  private String escapeCsv(String val) {
+    if (val == null) return "";
+    if (val.contains(",") || val.contains("\"") || val.contains("\n")) {
+      return "\"" + val.replace("\"", "\"\"") + "\"";
+    }
+    return val;
+  }
+
   public void heartbeat(String node) {
     heartbeats.put(node, Instant.now());
   }

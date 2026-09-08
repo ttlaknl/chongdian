@@ -3,7 +3,10 @@ package com.charging.cloud;
 import jakarta.validation.Valid;
 import java.time.Instant;
 import java.util.*;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
@@ -58,6 +61,18 @@ public class CloudController {
       return store.filterEvents(spaceId, plate, violationType);
     }
     return store.events();
+  }
+
+  @GetMapping(value = "/events/export", produces = "text/csv;charset=UTF-8")
+  public ResponseEntity<String> exportEvents(
+      @RequestParam(required = false) String spaceId,
+      @RequestParam(required = false) String plate,
+      @RequestParam(required = false) String violationType) {
+    String csv = store.exportEventsCsv(spaceId, plate, violationType);
+    return ResponseEntity.ok()
+        .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=violation_ledger.csv")
+        .contentType(MediaType.parseMediaType("text/csv;charset=UTF-8"))
+        .body(csv);
   }
 
   @GetMapping("/dashboard/stats")

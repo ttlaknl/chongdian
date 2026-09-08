@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  # 1. 关系型持久化数据库 (PostgreSQL 16，兼容信创/ANSI SQL)
+  postgres:
+    image: postgres:16-alpine
+    container_name: chongdian-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: chongdian
+      POSTGRES_USER: chongdian
+      POSTGRES_PASSWORD: chongdian_secret_pwd
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../cloud-platform/src/main/resources/schema-ansi.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chongdian"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. 云端综合管控平台 (Spring Boot 3.4 / Java 21)
+  cloud-platform:
+    build:
+      context: ../cloud-platform
+      dockerfile: Dockerfile
+    container_name: chongdian-cloud
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: default
+      SERVER_PORT: 8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - cloud_data:/data/cloud_store
+
+  # 3. 边缘计算工控机服务 (Rust 1.95 编译)
+  edge-node:
+    build:
+      context: ../edge-node
+      dockerfile: Dockerfile
+    container_name: chongdian-edge
+    restart: always
+    privileged: true # 允许访问串口 /dev/ttyUSB* 与看门狗 /dev/watchdog
+    environment:
+      EDGE_NODE_ID: edge-host-01
+      EDGE_CLOUD_URL: http://cloud-platform:8080
+      EDGE_DATA_DIR: /data/edge
+    ports:
+      - "8081:8081"
+    volumes:
+      - edge_data:/data/edge
+      - /dev:/dev
+
+volumes:
+  pgdata:
+  cloud_data:
+  edge_data:

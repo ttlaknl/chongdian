@@ -25,6 +25,15 @@ pub use storage::*;
 pub mod operator;
 pub use operator::*;
 
+pub mod hardware;
+pub use hardware::*;
+
+pub mod pipeline;
+pub use pipeline::*;
+
+pub mod watchdog;
+pub use watchdog::*;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum VehicleType {

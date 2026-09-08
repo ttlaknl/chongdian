@@ -7,10 +7,11 @@ use axum::{
 use charging_space_edge::{
     evaluate, CameraChannel, ChargerAdapter, ChargerSnapshot, ChargerStatus, CloudEvent,
     ConfigurationStore, Decision, DynamicChargerAdapter, EvaluationInput, EventSpool,
-    ExternalChargerUpdate, MemoryRelayController, ModbusTcpRelayController, OperatorApiConfig,
-    OperatorCloudClient, PlatformConfiguration, PresencePhase, RawDetection, RelayChannelStatus,
-    RelayController, RuleConfig, SpacePresenceTracker, SpaceTrackerRegistry, SqliteStorage,
-    TransitionEvent, VideoChannelManager,
+    ExternalChargerUpdate, HardwareHealthMonitor, HardwareTransport, MemoryRelayController,
+    MockTransport, ModbusTcpRelayController, OperatorApiConfig, OperatorCloudClient,
+    PlatformConfiguration, PresencePhase, RawDetection, RelayChannelStatus, RelayController,
+    RuleConfig, SpacePresenceTracker, SpaceTrackerRegistry, SqliteStorage, TransitionEvent,
+    VideoChannelManager, WatchdogMonitor,
 };
 use chrono::Utc;
 use serde::Serialize;
@@ -30,6 +31,8 @@ struct AppState {
     trackers: Arc<SpaceTrackerRegistry>,
     chargers: Arc<DynamicChargerAdapter>,
     sqlite: Arc<SqliteStorage>,
+    watchdog: Arc<WatchdogMonitor>,
+    hardware_monitor: Arc<HardwareHealthMonitor>,
 }
 #[derive(Serialize)]
 struct Health {
@@ -41,6 +44,8 @@ struct Health {
     configured_spaces: usize,
     camera_channels: usize,
     charger_channels: usize,
+    watchdog_healthy: bool,
+    hardware_status: String,
 }
 
 const MAX_PENDING_EVENTS: usize = 10_000;
@@ -98,6 +103,11 @@ async fn main() {
         .apply_bindings(&initial_configuration.bindings)
         .expect("apply initial charger bindings");
 
+    let transport: Arc<dyn HardwareTransport> = Arc::new(MockTransport::new("EDGE_MOCK_BUS", "MOCK"));
+    let hardware_monitor = Arc::new(HardwareHealthMonitor::new(transport.clone()));
+    let watchdog = Arc::new(WatchdogMonitor::default());
+    let _wd_handle = watchdog.clone().start_loop();
+
     let state = AppState {
         configuration: Arc::new(tokio::sync::RwLock::new(initial_configuration)),
         relay: relay_controller,
@@ -113,6 +123,8 @@ async fn main() {
         trackers: Arc::new(SpaceTrackerRegistry::new()),
         chargers: chargers.clone(),
         sqlite: Arc::new(sqlite_storage),
+        watchdog: watchdog.clone(),
+        hardware_monitor: hardware_monitor.clone(),
     };
     let heartbeat_state = state.clone();
     tokio::spawn(async move {
@@ -185,8 +197,10 @@ async fn main() {
 async fn health(State(s): State<AppState>) -> Json<Health> {
     let charger_count = s.chargers.list_snapshots().map(|v| v.len()).unwrap_or(0);
     let pending = s.sqlite.pending_count().unwrap_or(0);
+    let wd_report = s.watchdog.tick();
+    let hw_report = s.hardware_monitor.report();
     Json(Health {
-        status: "UP",
+        status: if wd_report.all_subsystems_healthy { "UP" } else { "DEGRADED" },
         max_video_channels: 16,
         node_id: s.node_id.clone(),
         pending_events: pending,
@@ -201,6 +215,8 @@ async fn health(State(s): State<AppState>) -> Json<Health> {
             .count(),
         camera_channels: s.cameras.count().unwrap_or(0),
         charger_channels: charger_count,
+        watchdog_healthy: wd_report.all_subsystems_healthy,
+        hardware_status: hw_report.status,
     })
 }
 async fn relay_states(

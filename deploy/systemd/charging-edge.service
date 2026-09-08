@@ -1,0 +1,27 @@
+[Unit]
+Description=Charging Space Anti-Occupancy Warning Edge Node Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/chongdian
+ExecStart=/opt/chongdian/charging-space-edge
+Restart=always
+RestartSec=3s
+WatchdogSec=30s
+
+# 工业边缘工控机高可用与系统资源优化
+LimitNOFILE=65535
+OOMScoreAdjust=-500
+TimeoutStopSec=15s
+
+# 环境变量
+Environment=RUST_LOG=info
+Environment=EDGE_DATA_DIR=/var/lib/chongdian/data
+Environment=EDGE_NODE_ID=edge-station-01
+Environment=EDGE_CLOUD_URL=http://192.168.1.100:8080
+
+[Install]
+WantedBy=multi-user.target
