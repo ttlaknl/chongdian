@@ -4,17 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>充电车位防占位智能预警监控大屏</title>
-  <!-- 引入 TailwindCSS 与 Vue 3 / ECharts 依赖 CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="/vendor/app.css">
+  <link rel="stylesheet" href="/vendor/fontawesome/css/all.min.css">
+  <script src="/vendor/vue.global.prod.js"></script>
+  <script src="/vendor/echarts.min.js"></script>
   <style>
     body { background-color: #0B1120; color: #E2E8F0; font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
     .neon-border { box-shadow: 0 0 15px rgba(59, 130, 246, 0.3); }
     .alarm-blink { animation: blink 1s infinite alternate; }
     @keyframes blink { from { box-shadow: 0 0 10px #ef4444; border-color: #ef4444; } to { box-shadow: 0 0 25px #dc2626; border-color: #f87171; } }
-    /* 自定义滚动条样式 */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.6); }
     ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
@@ -33,31 +31,55 @@
           <h1 class="text-2xl font-bold tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-blue-400 via-cyan-300 to-teal-300">
             充电车位防占位智能预警监控中心
           </h1>
-          <p class="text-xs text-slate-400">工业云边协同 · 6~16路动态在位感知 · 现场声光与RS485语音双模驱离</p>
+          <p class="text-xs text-slate-400">工业云边协同 · 6~16路动态在位感知 · 现场声光与RS485语音双模驱离 · 实时SSE流</p>
         </div>
       </div>
-      <div class="flex items-center space-x-4 text-sm">
-        <div class="flex items-center space-x-2">
-          <span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
-          <span class="text-slate-300">边缘工控机: {{ stats.onlineNodes }}/{{ Math.max(stats.totalNodes, 1) }} 在线</span>
+      <div class="flex items-center space-x-3 text-sm">
+        <!-- SSE 实时通信连接状态指示 -->
+        <div class="flex items-center space-x-2 px-2.5 py-1 rounded bg-slate-800/80 border border-slate-700/80 text-xs">
+          <span :class="['inline-block w-2.5 h-2.5 rounded-full', sseConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400']"></span>
+          <span class="text-slate-300 font-mono">{{ sseConnected ? 'SSE: 实时推流中' : 'SSE: 重连降级轮询' }}</span>
         </div>
-        <div class="text-slate-400 font-mono"><i class="fa-regular fa-clock mr-1"></i> {{ currentTime }}</div>
+
+        <div class="flex items-center space-x-2 text-xs text-slate-300">
+          <span class="inline-block w-2.5 h-2.5 rounded-full bg-cyan-400"></span>
+          <span>边缘机: {{ stats.onlineNodes }}/{{ Math.max(stats.totalNodes, 1) }} 在线</span>
+        </div>
+
+        <!-- 权限与认证状态 (大屏完全免密公开) -->
+        <span class="px-2.5 py-1 bg-slate-800/90 border border-slate-700/80 rounded text-xs text-slate-300 flex items-center">
+          <i class="fa-solid fa-eye mr-1.5 text-emerald-400"></i>
+          <span>{{ authRole }}</span>
+        </span>
+
+        <div class="text-slate-400 font-mono text-xs"><i class="fa-regular fa-clock mr-1"></i> {{ currentTime }}</div>
         
         <!-- 操作按钮组 -->
-        <button @click="openRulesModal" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-xs text-slate-200 transition">
-          <i class="fa-solid fa-sliders mr-1 text-cyan-400"></i>规则配置
-        </button>
-        <button @click="openWhitelistModal" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-xs text-slate-200 transition">
-          <i class="fa-solid fa-id-card mr-1 text-emerald-400"></i>白名单管理
-        </button>
-        <a href="/api/v1/events/export" target="_blank" class="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 rounded text-xs text-white transition flex items-center shadow-sm">
-          <i class="fa-solid fa-file-csv mr-1"></i>导出台账 (CSV)
+        <a href="/admin.html" target="_blank" class="px-3 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 rounded text-xs text-white font-semibold shadow transition flex items-center">
+          <i class="fa-solid fa-sliders mr-1.5"></i>管理员操作后台
         </a>
-        <button @click="fetchData" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-xs text-white transition">
+        <button @click="openRulesModal" class="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-xs text-slate-300 transition">
+          <i class="fa-solid fa-circle-info mr-1 text-cyan-400"></i>查看规则
+        </button>
+        <button @click="exportEvents" class="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 rounded text-xs text-white transition flex items-center shadow-sm">
+          <i class="fa-solid fa-file-csv mr-1"></i>导出台账
+        </button>
+        <button @click="fetchData" class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded text-xs text-slate-200 transition">
           <i class="fa-solid fa-rotate mr-1"></i>刷新
         </button>
       </div>
     </header>
+
+    <!-- 错误 / 降级横幅 (SSE 断开或网络异常时显示) -->
+    <div v-if="!sseConnected" class="bg-amber-950/70 border border-amber-500/50 rounded-lg px-4 py-2 flex items-center justify-between text-amber-200 text-xs">
+      <div class="flex items-center space-x-2">
+        <i class="fa-solid fa-triangle-exclamation text-amber-400"></i>
+        <span>实时推送通道 (SSE) 断开或处于重连中，系统已无缝降级为定时轮询同步机制（3秒周期），数据流持续可用。</span>
+      </div>
+      <button @click="initSse" class="px-2.5 py-1 bg-amber-800 hover:bg-amber-700 text-amber-100 rounded text-xs font-semibold">
+        立即重试长连接
+      </button>
+    </div>
 
     <!-- 2. KPI 指标概览卡片 -->
     <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
@@ -100,11 +122,20 @@
             <span class="flex items-center"><span class="w-2.5 h-2.5 rounded-full bg-slate-700 mr-1"></span>空闲</span>
             <span class="flex items-center"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500 mr-1"></span>充电中</span>
             <span class="flex items-center"><span class="w-2.5 h-2.5 rounded-full bg-rose-500 mr-1 animate-ping"></span>占位违规</span>
+            <span class="border-l border-slate-700 pl-2 flex items-center text-emerald-400"><i class="fa-solid fa-circle-check mr-1"></i>真实视频流</span>
+            <span class="flex items-center text-amber-400"><i class="fa-solid fa-triangle-exclamation mr-1"></i>MOCK模拟</span>
           </div>
         </div>
 
+        <!-- 空状态显示 (车位为0时) -->
+        <div v-if="spaces.length === 0" class="flex-1 flex flex-col items-center justify-center py-16 text-slate-500 border border-dashed border-slate-800 rounded-lg">
+          <i class="fa-solid fa-charging-station text-4xl mb-3 text-slate-600"></i>
+          <p class="text-sm font-medium text-slate-400">暂无车位绑定数据</p>
+          <p class="text-xs text-slate-500 mt-1">请等待边缘工控机同步或前往规则配置中进行设备桩位绑定</p>
+        </div>
+
         <!-- 车位卡片栅格 (响应式根据 6~16 个自适应) -->
-        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 flex-1 overflow-y-auto max-h-[580px] p-1">
+        <div v-else class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 flex-1 overflow-y-auto max-h-[580px] p-1">
           <div v-for="s in spaces" :key="s.spaceId"
                :class="['rounded-lg p-3 border transition duration-200 relative flex flex-col justify-between cursor-pointer hover:scale-[1.01]',
                         s.isAlarming ? 'bg-rose-950/40 border-rose-500 alarm-blink' :
@@ -123,6 +154,17 @@
                   {{ s.statusText }}
                 </span>
               </div>
+
+              <!-- 数据源真实流与MOCK显式标识 -->
+              <div class="mt-1.5 flex items-center">
+                <span v-if="s.isSimulated" class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-950/80 text-amber-300 border border-amber-500/60 flex items-center shadow-sm">
+                  <i class="fa-solid fa-flask mr-1 text-amber-400"></i>[MOCK 模拟数据]
+                </span>
+                <span v-else class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-500/60 flex items-center shadow-sm">
+                  <i class="fa-solid fa-video mr-1 text-emerald-400"></i>[真实流: {{ s.streamType || 'GB28181/RTSP' }}]
+                </span>
+              </div>
+
               <div class="mt-2 text-xs">
                 <div class="text-slate-400 flex items-center justify-between">
                   <span>车牌:</span>
@@ -137,12 +179,21 @@
               </div>
             </div>
 
-            <div class="mt-3 pt-2 border-t border-slate-700/60 flex items-center justify-between text-[11px] text-slate-400">
-              <span>通道 #{{ s.relayChannel }}</span>
-              <span v-if="s.isAlarming" class="text-rose-400 flex items-center font-bold">
-                <i class="fa-solid fa-bullhorn mr-1 animate-bounce"></i>正在驱离
-              </span>
-              <span v-else class="text-slate-500">正常</span>
+            <div>
+              <div class="mt-3 pt-2 border-t border-slate-700/60 flex items-center justify-between text-[11px] text-slate-400">
+                <span>继电器 #{{ s.relayChannel }}</span>
+                <span v-if="s.isAlarming" class="text-rose-400 flex items-center font-bold">
+                  <i class="fa-solid fa-bullhorn mr-1 animate-bounce"></i>正在驱离
+                </span>
+                <span v-else class="text-slate-500">运行正常</span>
+              </div>
+
+              <!-- 处于报警状态时提供一键人工确认/立即消警按钮 -->
+              <button v-if="s.isAlarming"
+                      @click.stop="quickAcknowledge(s)"
+                      class="mt-2 w-full py-1 bg-rose-600 hover:bg-rose-500 text-white rounded text-[11px] font-semibold flex items-center justify-center shadow-sm transition">
+                <i class="fa-solid fa-bell-slash mr-1"></i>人工确认 / 立即消警
+              </button>
             </div>
           </div>
         </div>
@@ -166,68 +217,96 @@
             </h3>
             <span class="text-xs text-slate-500 font-normal">最新 8 条</span>
           </div>
-          <div class="space-y-2 overflow-y-auto flex-1 pr-1 text-xs">
+
+          <!-- 事件流列表与空状态 -->
+          <div v-if="recentEvents.length === 0" class="flex-1 flex flex-col items-center justify-center py-10 text-slate-600">
+            <i class="fa-solid fa-shield-halved text-3xl mb-2 text-slate-700"></i>
+            <span class="text-xs">暂无违规预警事件，运行合规良好</span>
+          </div>
+
+          <div v-else class="space-y-2 overflow-y-auto flex-1 pr-1 text-xs">
             <div v-for="ev in recentEvents" :key="ev.eventId"
                  class="bg-slate-800/80 border border-slate-700/70 rounded p-2 flex items-center justify-between hover:bg-slate-800 transition">
               <div>
                 <div class="flex items-center space-x-2">
                   <span class="font-mono font-bold text-rose-400">{{ ev.spaceId }}</span>
                   <span class="font-mono text-slate-200 font-semibold">{{ ev.plate || '未知车牌' }}</span>
+                  <span :class="['text-[10px] px-1 rounded font-bold',
+                                 ev.status === 'ACKNOWLEDGED' ? 'bg-emerald-950 text-emerald-300 border border-emerald-500/40' :
+                                 ev.status === 'CLEARED' ? 'bg-slate-700 text-slate-300' :
+                                 'bg-rose-950 text-rose-300 border border-rose-500/40 animate-pulse']">
+                    {{ ev.status === 'ACKNOWLEDGED' ? '已消警' : ev.status === 'CLEARED' ? '已驶离' : '报警中' }}
+                  </span>
                 </div>
                 <div class="text-[11px] text-slate-400 mt-0.5">{{ formatViolation(ev.violationType) }}</div>
               </div>
-              <div class="text-[10px] text-slate-500 font-mono text-right">
-                {{ formatTime(ev.occurredAt) }}
+              <div class="flex flex-col items-end space-y-1">
+                <span class="text-[10px] text-slate-500 font-mono">{{ formatTime(ev.occurredAt) }}</span>
+                <button v-if="ev.status === 'ALARMING'"
+                        @click="acknowledgeEvent(ev.eventId)"
+                        class="px-2 py-0.5 bg-rose-600 hover:bg-rose-500 text-white rounded text-[10px] font-medium shadow-sm transition">
+                  人工确认
+                </button>
               </div>
             </div>
-            <div v-if="recentEvents.length === 0" class="text-center text-slate-600 py-6">
-              暂无违规预警事件
-            </div>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- 弹窗一：白名单管理 Modal -->
-    <div v-if="showWhitelistModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
-      <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-lg w-full p-5 space-y-4">
+    <!-- 弹窗一：车位详情与消警 Modal -->
+    <div v-if="inspectingSpace" class="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50">
+      <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl">
         <div class="flex items-center justify-between border-b border-slate-800 pb-2">
           <h3 class="text-base font-bold text-slate-100 flex items-center">
-            <i class="fa-solid fa-id-card text-emerald-400 mr-2"></i>特权白名单管理
+            <i class="fa-solid fa-circle-info text-blue-400 mr-2"></i>车位详情 [{{ inspectingSpace.spaceId }}]
           </h3>
-          <button @click="showWhitelistModal = false" class="text-slate-400 hover:text-white">&times;</button>
-        </div>
-        
-        <!-- 新增白名单表单 -->
-        <div class="bg-slate-800/60 p-3 rounded-lg space-y-2 text-xs">
-          <div class="font-semibold text-slate-300">快速录入白名单</div>
-          <div class="grid grid-cols-2 gap-2">
-            <input v-model="newWhitelist.plate" placeholder="车牌号 (例: 粤B99999)" class="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-white">
-            <input v-model="newWhitelist.reason" placeholder="登记原因 (例: 内部运维车)" class="bg-slate-950 border border-slate-700 rounded px-2 py-1 text-white">
-          </div>
-          <button @click="addWhitelist" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white rounded py-1 font-medium transition">
-            确认添加
-          </button>
+          <button @click="inspectingSpace = null" class="text-slate-400 hover:text-white">&times;</button>
         </div>
 
-        <!-- 白名单列表 -->
-        <div class="max-h-[220px] overflow-y-auto space-y-1.5 text-xs">
-          <div v-for="w in whitelistList" :key="w.plate" class="bg-slate-800/80 p-2 rounded flex items-center justify-between">
-            <div>
-              <span class="font-mono font-bold text-emerald-400 mr-2">{{ w.plate }}</span>
-              <span class="text-slate-400">{{ w.reason || '无备注' }}</span>
-            </div>
-            <button @click="deleteWhitelist(w.plate)" class="text-rose-400 hover:text-rose-300 px-2">
-              <i class="fa-solid fa-trash-can"></i>
-            </button>
+        <div class="space-y-2 text-xs text-slate-300 bg-slate-800/60 p-3 rounded-lg">
+          <div class="flex justify-between py-1 border-b border-slate-700/60">
+            <span class="text-slate-400">车位编号:</span>
+            <span class="font-mono font-bold text-white">{{ inspectingSpace.spaceId }}</span>
           </div>
+          <div class="flex justify-between py-1 border-b border-slate-700/60">
+            <span class="text-slate-400">当前状态:</span>
+            <span class="font-semibold" :class="inspectingSpace.isAlarming ? 'text-rose-400' : 'text-emerald-400'">{{ inspectingSpace.statusText }}</span>
+          </div>
+          <div class="flex justify-between py-1 border-b border-slate-700/60">
+            <span class="text-slate-400">感知数据流:</span>
+            <span :class="inspectingSpace.isSimulated ? 'text-amber-400' : 'text-emerald-400'">{{ inspectingSpace.streamType }}</span>
+          </div>
+          <div class="flex justify-between py-1 border-b border-slate-700/60">
+            <span class="text-slate-400">车牌号码:</span>
+            <span class="font-mono font-medium text-slate-100">{{ inspectingSpace.plate || '无 / 未识别' }}</span>
+          </div>
+          <div class="flex justify-between py-1 border-b border-slate-700/60">
+            <span class="text-slate-400">车辆动力类型:</span>
+            <span>{{ inspectingSpace.vehicleTypeText }}</span>
+          </div>
+          <div class="flex justify-between py-1">
+            <span class="text-slate-400">关联继电器通道:</span>
+            <span class="font-mono">#{{ inspectingSpace.relayChannel }}</span>
+          </div>
+        </div>
+
+        <div class="flex space-x-2 pt-2">
+          <button v-if="inspectingSpace.isAlarming"
+                  @click="quickAcknowledge(inspectingSpace)"
+                  class="flex-1 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded font-medium text-xs shadow transition flex items-center justify-center">
+            <i class="fa-solid fa-bell-slash mr-1.5"></i>人工确认 / 立即消警
+          </button>
+          <button @click="inspectingSpace = null" class="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-medium text-xs transition">
+            关闭
+          </button>
         </div>
       </div>
     </div>
 
-    <!-- 弹窗二：规则阈值设置 Modal -->
+    <!-- 弹窗三：规则阈值设置 Modal -->
     <div v-if="showRulesModal" class="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-50">
-      <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-md w-full p-5 space-y-4">
+      <div class="bg-slate-900 border border-slate-700 rounded-xl max-w-md w-full p-5 space-y-4 shadow-2xl">
         <div class="flex items-center justify-between border-b border-slate-800 pb-2">
           <h3 class="text-base font-bold text-slate-100 flex items-center">
             <i class="fa-solid fa-sliders text-cyan-400 mr-2"></i>防占位规则阈值热更新
@@ -258,7 +337,7 @@
   </div>
 
   <script>
-    const { createApp, ref, computed, onMounted } = Vue;
+    const { createApp, ref, computed, onMounted, onUnmounted } = Vue;
 
     createApp({
       setup() {
@@ -267,13 +346,43 @@
         const recentEvents = ref([]);
         const whitelistCount = ref(0);
         const currentTime = ref(new Date().toLocaleTimeString());
+        const sseConnected = ref(false);
+        const authRole = ref('免密公开监控中');
+        const inspectingSpace = ref(null);
+
         let typeChartInstance = null;
+        let spacesEventSource = null;
+        let eventsEventSource = null;
+        let sseRetryTimer = null;
+        let pollTimer = null;
 
-        // 白名单与规则弹窗
-        const showWhitelistModal = ref(false);
-        const whitelistList = ref([]);
-        const newWhitelist = ref({ plate: '', reason: '' });
+        const checkSession = async () => {
+          try {
+            const res = await fetch('/api/v1/auth/session');
+            if (res.ok) {
+              const data = await res.json();
+              if (data.authenticated) {
+                authRole.value = data.role === 'ADMIN' ? '管理员已登录' : '操作员已登录';
+              } else {
+                authRole.value = '免密公开监控中';
+              }
+            }
+          } catch (e) {
+            authRole.value = '免密公开监控中';
+          }
+        };
 
+        const apiFetch = async (url, options = {}) => {
+          let headers = options.headers ? { ...options.headers } : {};
+          const savedKey = localStorage.getItem('chongdian_admin_key');
+          if (savedKey) {
+            headers['X-Api-Key'] = savedKey;
+          }
+          options.headers = headers;
+          return fetch(url, options);
+        };
+
+        // 规则弹窗
         const showRulesModal = ref(false);
         const currentRules = ref({
           unchargedGraceSeconds: 600,
@@ -319,45 +428,131 @@
           });
         };
 
+        const mapSpacesFromRuntime = (bindings, runtimeStatuses) => {
+          return bindings.map(b => {
+            const runtime = runtimeStatuses.find(s => s.spaceId === b.spaceId);
+            const isStale = runtime && Date.now() - new Date(runtime.observedAt).getTime() > 15000;
+            const isAlarming = !!runtime && !isStale && runtime.alarming;
+            const status = !runtime || isStale ? 'OFFLINE' :
+              isAlarming ? 'VIOLATION' :
+              runtime.chargerStatus === 'CHARGING' ? 'CHARGING' :
+              runtime.phase === 'EMPTY' ? 'IDLE' : 'OCCUPIED';
+            const statusText = status === 'VIOLATION' ? '占位违规' :
+              status === 'CHARGING' ? '充电中' :
+              status === 'OCCUPIED' ? '车辆在位' :
+              status === 'OFFLINE' ? '状态离线' : '车位空闲';
+            const isSimulated = runtime ? (runtime.isSimulated === true) : false;
+            const streamType = runtime ? (runtime.streamType || (isSimulated ? '[MOCK_SIMULATED] 录像回放数据集' : 'GB28181/RTSP')) : 'GB28181/RTSP';
+            return {
+              spaceId: b.spaceId,
+              relayChannel: b.relayChannel,
+              status,
+              statusText,
+              plate: runtime ? runtime.plate : '',
+              vehicleType: runtime ? runtime.vehicleType : 'UNKNOWN',
+              vehicleTypeText: runtime && runtime.vehicleType === 'FUEL' ? '燃油车' :
+                runtime && runtime.vehicleType === 'NEW_ENERGY' ? '新能源车' :
+                status === 'IDLE' ? '无车' : '未知',
+              isAlarming,
+              isSimulated,
+              streamType
+            };
+          });
+        };
+
+        // SSE 实时推流建立
+        const initSse = () => {
+          if (spacesEventSource) spacesEventSource.close();
+          if (eventsEventSource) eventsEventSource.close();
+
+          try {
+            spacesEventSource = new EventSource('/api/v1/stream/spaces');
+            spacesEventSource.addEventListener('spaces', (e) => {
+              sseConnected.value = true;
+              try {
+                const runtimeStatuses = JSON.parse(e.data);
+                // 同步至车位视图
+                if (currentBindings.length > 0) {
+                  spaces.value = mapSpacesFromRuntime(currentBindings, runtimeStatuses);
+                }
+              } catch (err) {
+                console.warn('解析 SSE spaces 失败', err);
+              }
+            });
+            spacesEventSource.onerror = () => {
+              sseConnected.value = false;
+            };
+
+            eventsEventSource = new EventSource('/api/v1/stream/events');
+            eventsEventSource.addEventListener('events', (e) => {
+              sseConnected.value = true;
+              try {
+                const eventPayload = JSON.parse(e.data);
+                if (Array.isArray(eventPayload)) {
+                  recentEvents.value = eventPayload.slice(0, 8);
+                } else if (eventPayload && eventPayload.eventId) {
+                  // 单个事件追加
+                  const idx = recentEvents.value.findIndex(ev => ev.eventId === eventPayload.eventId);
+                  if (idx >= 0) {
+                    recentEvents.value[idx] = eventPayload;
+                  } else {
+                    recentEvents.value.unshift(eventPayload);
+                    if (recentEvents.value.length > 8) recentEvents.value.pop();
+                  }
+                  // 触发统计刷新
+                  fetchStatsOnly();
+                }
+              } catch (err) {
+                console.warn('解析 SSE events 失败', err);
+              }
+            });
+            eventsEventSource.onerror = () => {
+              sseConnected.value = false;
+            };
+          } catch (err) {
+            sseConnected.value = false;
+          }
+        };
+
+        let currentBindings = [];
+
+        const fetchStatsOnly = async () => {
+          try {
+            const sRes = await apiFetch('/api/v1/dashboard/stats');
+            if (sRes.ok) {
+              stats.value = await sRes.json();
+              updateChart();
+            }
+          } catch (e) {}
+        };
+
         const fetchData = async () => {
           try {
-            // 1. 获取全局统计
-            const sRes = await fetch('/api/v1/dashboard/stats');
+            // 1. 获取全局统计 (免密公开)
+            const sRes = await apiFetch('/api/v1/dashboard/stats');
             if (sRes.ok) stats.value = await sRes.json();
 
-            // 2. 获取事件列表
-            const eRes = await fetch('/api/v1/events');
+            // 2. 获取事件列表 (免密公开)
+            const eRes = await apiFetch('/api/v1/events');
             if (eRes.ok) {
               const allEvents = await eRes.json();
               recentEvents.value = allEvents.slice(0, 8);
             }
 
-            // 3. 获取车位配置与动态状态
-            const cRes = await fetch('/api/v1/configuration');
+            // 3. 获取车位配置与边缘节点实时状态 (免密公开)
+            const [cRes, rtRes] = await Promise.all([
+              apiFetch('/api/v1/configuration'),
+              apiFetch('/api/v1/spaces/status')
+            ]);
             if (cRes.ok) {
               const cfg = await cRes.json();
-              const bindings = cfg.bindings || [];
-              spaces.value = bindings.map(b => {
-                const latestEv = recentEvents.value.find(e => e.spaceId === b.spaceId);
-                const isAlarming = !!latestEv;
-                return {
-                  spaceId: b.spaceId,
-                  relayChannel: b.relayChannel,
-                  status: isAlarming ? 'VIOLATION' : 'IDLE',
-                  statusText: isAlarming ? '占位违规' : '车位空闲',
-                  plate: latestEv ? latestEv.plate : '',
-                  vehicleType: latestEv ? latestEv.vehicleType : 'UNKNOWN',
-                  vehicleTypeText: latestEv ? (latestEv.vehicleType === 'FUEL' ? '燃油车' : '新能源车') : '无车',
-                  isAlarming
-                };
-              });
-            }
-
-            // 4. 白名单统计
-            const wRes = await fetch('/api/v1/whitelist');
-            if (wRes.ok) {
-              whitelistList.value = await wRes.json();
-              whitelistCount.value = whitelistList.value.length;
+              currentBindings = cfg.bindings || [];
+              const runtimeStatuses = rtRes.ok ? await rtRes.json() : [];
+              spaces.value = mapSpacesFromRuntime(currentBindings, runtimeStatuses);
+              // 白名单统计来自配置接口 (免密公开)
+              if (Array.isArray(cfg.whitelist)) {
+                whitelistCount.value = cfg.whitelist.length;
+              }
             }
 
             updateChart();
@@ -366,48 +561,58 @@
           }
         };
 
-        const openWhitelistModal = async () => {
-          showWhitelistModal.value = true;
-          const wRes = await fetch('/api/v1/whitelist');
-          if (wRes.ok) whitelistList.value = await wRes.json();
-        };
-
-        const addWhitelist = async () => {
-          if (!newWhitelist.value.plate) return;
-          const res = await fetch('/api/v1/whitelist', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              plate: newWhitelist.value.plate.trim(),
-              reason: newWhitelist.value.reason.trim(),
-              vehicleType: 'FUEL',
-              addedAt: new Date().toISOString(),
-              enabled: true
-            })
-          });
-          if (res.ok) {
-            newWhitelist.value = { plate: '', reason: '' };
-            await openWhitelistModal();
-            fetchData();
+        // 人工确认 / 立即消警 API
+        const acknowledgeEvent = async (eventId) => {
+          try {
+            const res = await apiFetch(`/api/v1/events/${eventId}/acknowledge`, { method: 'POST' });
+            if (res.ok) {
+              await fetchData();
+              if (inspectingSpace.value) {
+                inspectingSpace.value = null;
+              }
+            } else if (res.status === 401) {
+              if (confirm('消警属于受保护的管理操作，需要管理员权限。是否立即前往【管理员操作后台】？')) {
+                window.open('/admin.html', '_blank');
+              }
+            } else {
+              alert('人工消警失败，请确认网络状态');
+            }
+          } catch (err) {
+            console.error('消警请求异常', err);
           }
         };
 
-        const deleteWhitelist = async (plate) => {
-          const res = await fetch(`/api/v1/whitelist/${encodeURIComponent(plate)}`, { method: 'DELETE' });
-          if (res.ok) {
-            await openWhitelistModal();
-            fetchData();
+        // 针对特定车位的一键消警
+        const quickAcknowledge = async (s) => {
+          const ev = recentEvents.value.find(e => e.spaceId === s.spaceId && e.status === 'ALARMING');
+          if (ev) {
+            await acknowledgeEvent(ev.eventId);
+          } else {
+            try {
+              const res = await apiFetch(`/api/v1/events?spaceId=${encodeURIComponent(s.spaceId)}`);
+              if (res.ok) {
+                const list = await res.json();
+                const target = list.find(e => e.status === 'ALARMING');
+                if (target) {
+                  await acknowledgeEvent(target.eventId);
+                  return;
+                }
+              }
+              alert(`车位 [${s.spaceId}] 已人工消警或无活跃告警`);
+            } catch (e) {
+              alert('消警请求失败');
+            }
           }
         };
 
         const openRulesModal = async () => {
           showRulesModal.value = true;
-          const rRes = await fetch('/api/v1/rules');
+          const rRes = await apiFetch('/api/v1/rules');
           if (rRes.ok) currentRules.value = await rRes.json();
         };
 
         const saveRules = async () => {
-          const res = await fetch('/api/v1/rules', {
+          const res = await apiFetch('/api/v1/rules', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(currentRules.value)
@@ -415,21 +620,42 @@
           if (res.ok) {
             showRulesModal.value = false;
             fetchData();
+          } else if (res.status === 401) {
+            alert('修改规则策略需在【管理员操作后台】中登录后操作');
+            window.open('/admin.html', '_blank');
           }
         };
 
+        const exportEvents = async () => {
+          const response = await apiFetch('/api/v1/events/export');
+          if (!response.ok) return;
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement('a');
+          anchor.href = url;
+          anchor.download = 'violation_ledger.csv';
+          anchor.click();
+          URL.revokeObjectURL(url);
+        };
+
         const inspectSpace = (s) => {
-          if (s.isAlarming) {
-            alert(`车位 [${s.spaceId}] 正在触发声光驱离！\n违规车牌: ${s.plate || '未知'}\n车型: ${s.vehicleTypeText}`);
-          }
+          inspectingSpace.value = s;
         };
 
         onMounted(() => {
           initChart();
+          checkSession();
           fetchData();
+          initSse();
           setInterval(() => { currentTime.value = new Date().toLocaleTimeString(); }, 1000);
-          setInterval(fetchData, 3000);
+          pollTimer = setInterval(fetchData, 4000);
           window.addEventListener('resize', () => typeChartInstance && typeChartInstance.resize());
+        });
+
+        onUnmounted(() => {
+          if (spacesEventSource) spacesEventSource.close();
+          if (eventsEventSource) eventsEventSource.close();
+          if (pollTimer) clearInterval(pollTimer);
         });
 
         const formatViolation = (t) => {
@@ -447,9 +673,9 @@
 
         return {
           stats, spaces, recentEvents, whitelistCount, currentTime,
-          chargingSpacesCount, alarmingSpacesCount, fetchData, formatViolation, formatTime,
-          showWhitelistModal, whitelistList, newWhitelist, openWhitelistModal, addWhitelist, deleteWhitelist,
-          showRulesModal, currentRules, openRulesModal, saveRules, inspectSpace
+          chargingSpacesCount, alarmingSpacesCount, fetchData, exportEvents, formatViolation, formatTime,
+          showRulesModal, currentRules, openRulesModal, saveRules, inspectSpace,
+          sseConnected, initSse, authRole, inspectingSpace, acknowledgeEvent, quickAcknowledge
         };
       }
     }).mount('#app');
