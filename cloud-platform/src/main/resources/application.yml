@@ -1,0 +1,59 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: charging-cloud-platform
+  profiles:
+    active: ${ACTIVE_PROFILE:default}
+
+---
+# 默认开发/内存/轻量模式 (零数据库外部依赖，开箱即用)
+spring:
+  config:
+    activate:
+      on-profile: default
+
+---
+# PostgreSQL 生产环境配置
+spring:
+  config:
+    activate:
+      on-profile: pg
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:charging_db}?currentSchema=public
+    username: ${DB_USER:postgres}
+    password: ${DB_PASS:postgres123}
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: update
+
+---
+# 人大金仓 (KingbaseES V8/V9) 信创国产化配置
+spring:
+  config:
+    activate:
+      on-profile: kingbase
+  datasource:
+    driver-class-name: com.kingbase8.Driver
+    url: jdbc:kingbase8://${DB_HOST:localhost}:${DB_PORT:54321}/${DB_NAME:charging_db}
+    username: ${DB_USER:SYSTEM}
+    password: ${DB_PASS:kingbase123}
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+
+---
+# 达梦数据库 (DM8) 信创国产化配置
+spring:
+  config:
+    activate:
+      on-profile: dm8
+  datasource:
+    driver-class-name: dm.jdbc.driver.DmDriver
+    url: jdbc:dm://${DB_HOST:localhost}:${DB_PORT:5236}/${DB_NAME:charging_db}
+    username: ${DB_USER:SYSDBA}
+    password: ${DB_PASS:SYSDBA}
+  jpa:
+    database-platform: org.hibernate.dialect.DmDialect
