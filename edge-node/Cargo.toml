@@ -10,7 +10,27 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
+hmac = "0.12"
+sha2 = "0.10"
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false }
+# H.264 / H.265 视频解码
+openh264 = "0.7"
+# RK3588 MPP 硬件解码 FFI
+libloading = "0.8"
+# H.265 / HEVC 硬件解码: 通过 libloading 动态加载 RK3588 MPP (librockchip_mpp.so)
+# 非 RK3588 环境自动降级为 H.264 软件解码 (openh264)
+# DRM / DMA-BUF GPU 内存管理 (仅 Linux)
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
 
 [dev-dependencies]

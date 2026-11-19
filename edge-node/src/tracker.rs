@@ -18,6 +18,10 @@ pub enum PresencePhase {
     Leaving,
 }
 
+fn default_data_source() -> String {
+    "REAL_STREAM".to_string()
+}
+
 /// 相机或视频分析算法上报的原始识别帧数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,6 +33,37 @@ pub struct RawDetection {
     pub captured_at: DateTime<Utc>,
     /// 抓拍图片相对路径或 URL (若有)
     pub evidence_image_path: Option<String>,
+    #[serde(default)]
+    pub is_simulated: bool,
+    #[serde(default = "default_data_source")]
+    pub data_source: String,
+    #[serde(default)]
+    pub confidence: Option<f64>,
+    #[serde(default)]
+    pub plate_color: Option<String>,
+    #[serde(default)]
+    pub camera_id: Option<String>,
+    #[serde(default)]
+    pub image_base64: Option<String>,
+}
+
+impl Default for RawDetection {
+    fn default() -> Self {
+        Self {
+            space_id: String::new(),
+            has_vehicle: false,
+            plate: None,
+            vehicle_type: VehicleType::Unknown,
+            captured_at: Utc::now(),
+            evidence_image_path: None,
+            is_simulated: false,
+            data_source: "REAL_STREAM".to_string(),
+            confidence: None,
+            plate_color: None,
+            camera_id: None,
+            image_base64: None,
+        }
+    }
 }
 
 /// 状态机转换事件输出
@@ -45,6 +80,8 @@ pub enum TransitionEvent {
     /// 车辆正式驶离确认（离场防抖通过）
     VehicleLeft {
         occupied_duration_seconds: i64,
+        plate: Option<String>,
+        vehicle_type: VehicleType,
     },
 }
 
@@ -60,6 +97,10 @@ pub struct SpacePresenceTracker {
     pub confirmed_enter_at: Option<DateTime<Utc>>,
     pub candidate_leave_at: Option<DateTime<Utc>>,
     pub last_evidence_path: Option<String>,
+    #[serde(default)]
+    pub last_confidence: f64,
+    #[serde(default)]
+    pub last_plate_color: Option<String>,
 }
 
 impl SpacePresenceTracker {
@@ -73,6 +114,8 @@ impl SpacePresenceTracker {
             confirmed_enter_at: None,
             candidate_leave_at: None,
             last_evidence_path: None,
+            last_confidence: 0.0,
+            last_plate_color: None,
         }
     }
 
@@ -84,6 +127,12 @@ impl SpacePresenceTracker {
         }
 
         if detection.has_vehicle {
+            if let Some(conf) = detection.confidence {
+                self.last_confidence = conf;
+            }
+            if detection.plate_color.is_some() {
+                self.last_plate_color = detection.plate_color.clone();
+            }
             // 当前帧检测到有车
             match self.phase {
                 PresencePhase::Empty => {
@@ -96,6 +145,13 @@ impl SpacePresenceTracker {
                     TransitionEvent::None
                 }
                 PresencePhase::Entering => {
+                    // 进场观察期内持续更新更高置信度的车牌/车型识别结果
+                    if detection.plate.is_some() {
+                        self.candidate_plate = detection.plate.clone();
+                    }
+                    if detection.vehicle_type != VehicleType::Unknown {
+                        self.candidate_vehicle_type = detection.vehicle_type.clone();
+                    }
                     // 检查是否已经满足进场防抖时长
                     let enter_start = self.candidate_enter_at.unwrap_or(now);
                     if (now - enter_start).num_seconds() >= rules.vehicle_enter_confirm_seconds {
@@ -113,8 +169,11 @@ impl SpacePresenceTracker {
                 PresencePhase::Occupied => {
                     // 持续在位，若之前有离场候选，消除抖动重置
                     self.candidate_leave_at = None;
-                    if detection.plate.is_some() {
-                        self.candidate_plate = detection.plate.clone();
+                    if let Some(ref p) = detection.plate {
+                        if self.candidate_plate.as_ref() != Some(p) {
+                            self.last_evidence_path = None;
+                        }
+                        self.candidate_plate = Some(p.clone());
                     }
                     if detection.vehicle_type != VehicleType::Unknown {
                         self.candidate_vehicle_type = detection.vehicle_type.clone();
@@ -133,11 +192,25 @@ impl SpacePresenceTracker {
             match self.phase {
                 PresencePhase::Empty => TransitionEvent::None,
                 PresencePhase::Entering => {
-                    // 进场防抖未满即消失，判定为虚警，重置为空闲
+                    // 若此前已识别到车牌，视为测试或短暂停留驶离；否则判定为虚警重置
+                    let had_plate = self.candidate_plate.clone();
+                    let had_vtype = self.candidate_vehicle_type.clone();
                     self.phase = PresencePhase::Empty;
                     self.candidate_enter_at = None;
                     self.candidate_plate = None;
-                    TransitionEvent::None
+                    self.candidate_vehicle_type = VehicleType::Unknown;
+                    self.last_confidence = 0.0;
+                    self.last_plate_color = None;
+                    self.last_evidence_path = None;
+                    if had_plate.is_some() {
+                        TransitionEvent::VehicleLeft {
+                            occupied_duration_seconds: 0,
+                            plate: had_plate,
+                            vehicle_type: had_vtype,
+                        }
+                    } else {
+                        TransitionEvent::None
+                    }
                 }
                 PresencePhase::Occupied => {
                     // 已在位车辆首次丢失视野，转入离场防抖观察中
@@ -153,13 +226,21 @@ impl SpacePresenceTracker {
                             .confirmed_enter_at
                             .map(|t| (now - t).num_seconds())
                             .unwrap_or(0);
+                        let prev_plate = self.candidate_plate.clone();
+                        let prev_vtype = self.candidate_vehicle_type.clone();
                         self.phase = PresencePhase::Empty;
                         self.candidate_enter_at = None;
                         self.confirmed_enter_at = None;
                         self.candidate_leave_at = None;
                         self.candidate_plate = None;
+                        self.candidate_vehicle_type = VehicleType::Unknown;
+                        self.last_evidence_path = None;
+                        self.last_confidence = 0.0;
+                        self.last_plate_color = None;
                         TransitionEvent::VehicleLeft {
                             occupied_duration_seconds: duration,
+                            plate: prev_plate,
+                            vehicle_type: prev_vtype,
                         }
                     } else {
                         TransitionEvent::None
@@ -231,6 +312,28 @@ impl SpaceTrackerRegistry {
             .map_err(|_| "tracker lock poisoned".to_string())?;
         Ok(trackers.get(space_id).cloned())
     }
+
+    pub fn update_evidence_path(&self, space_id: &str, path: String) -> Result<(), String> {
+        let mut trackers = self
+            .trackers
+            .lock()
+            .map_err(|_| "tracker lock poisoned".to_string())?;
+        if let Some(tr) = trackers.get_mut(space_id) {
+            tr.last_evidence_path = Some(path);
+        }
+        Ok(())
+    }
+
+    pub fn prune_unbound_trackers(&self, active_space_ids: &[String]) -> Result<(), String> {
+        let mut trackers = self
+            .trackers
+            .lock()
+            .map_err(|_| "tracker lock poisoned".to_string())?;
+        let active_set: std::collections::HashSet<&str> =
+            active_space_ids.iter().map(|s| s.as_str()).collect();
+        trackers.retain(|space_id, _| active_set.contains(space_id.as_str()));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -252,6 +355,12 @@ mod tests {
             vehicle_type: VehicleType::Fuel,
             captured_at: t0,
             evidence_image_path: None,
+            is_simulated: false,
+            data_source: "REAL_STREAM".to_string(),
+            confidence: Some(0.95),
+            plate_color: Some("BLUE".into()),
+            camera_id: None,
+            image_base64: None,
         };
         assert_eq!(tracker.update(&d0, &rules), TransitionEvent::None);
         assert_eq!(tracker.phase, PresencePhase::Entering);
@@ -288,6 +397,12 @@ mod tests {
             vehicle_type: VehicleType::NewEnergy,
             captured_at: t0,
             evidence_image_path: None,
+            is_simulated: false,
+            data_source: "REAL_STREAM".to_string(),
+            confidence: Some(0.96),
+            plate_color: Some("GREEN".into()),
+            camera_id: None,
+            image_base64: None,
         };
         tracker.update(&d_enter, &rules);
         tracker.update(
@@ -307,6 +422,12 @@ mod tests {
             vehicle_type: VehicleType::Unknown,
             captured_at: t0 + Duration::seconds(10),
             evidence_image_path: None,
+            is_simulated: false,
+            data_source: "REAL_STREAM".to_string(),
+            confidence: None,
+            plate_color: None,
+            camera_id: None,
+            image_base64: None,
         };
         assert_eq!(tracker.update(&d_miss, &rules), TransitionEvent::None);
         assert_eq!(tracker.phase, PresencePhase::Leaving);

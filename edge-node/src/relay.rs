@@ -1,10 +1,14 @@
+use crate::DeviceBinding;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU16, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -46,7 +50,7 @@ impl ModbusFrame {
         }
         let crc = calculate_crc16(&frame);
         frame.push((crc & 0xFF) as u8); // CRC 低位在前
-        frame.push((crc >> 8) as u8);  // CRC 高位在后
+        frame.push((crc >> 8) as u8); // CRC 高位在后
         frame
     }
 
@@ -92,21 +96,26 @@ impl ModbusFrame {
     }
 
     /// 构造 Modbus TCP 读线圈状态指令 (0x01)
-    pub fn build_tcp_read_coils(tx_id: u16, unit_id: u8, start_channel: u16, count: u16) -> Vec<u8> {
-        let mut frame = Vec::with_capacity(12);
-        frame.push((tx_id >> 8) as u8);
-        frame.push((tx_id & 0xFF) as u8);
-        frame.push(0x00);
-        frame.push(0x00);
-        frame.push(0x00);
-        frame.push(0x06);
-        frame.push(unit_id);
-        frame.push(0x01);
-        frame.push((start_channel >> 8) as u8);
-        frame.push((start_channel & 0xFF) as u8);
-        frame.push((count >> 8) as u8);
-        frame.push((count & 0xFF) as u8);
-        frame
+    pub fn build_tcp_read_coils(
+        tx_id: u16,
+        unit_id: u8,
+        start_channel: u16,
+        count: u16,
+    ) -> Vec<u8> {
+        vec![
+            (tx_id >> 8) as u8,
+            (tx_id & 0xFF) as u8,
+            0x00,
+            0x00,
+            0x00,
+            0x06,
+            unit_id,
+            0x01,
+            (start_channel >> 8) as u8,
+            (start_channel & 0xFF) as u8,
+            (count >> 8) as u8,
+            (count & 0xFF) as u8,
+        ]
     }
 
     /// 校验并解析 Modbus RTU 响应帧
@@ -162,6 +171,8 @@ pub struct RelayChannelStatus {
 
 /// 继电器控制器通用特征
 pub trait RelayController: Send + Sync {
+    /// 原子替换车位到继电器通道的绑定关系。
+    fn apply_bindings(&self, bindings: &[DeviceBinding]) -> Result<(), String>;
     /// 设置对应车位的报警状态（开/关）
     fn set_alarm(&self, space_id: &str, enabled: bool) -> Result<(), String>;
     /// 获取当前所有车位的简化报警快照
@@ -184,7 +195,10 @@ impl MemoryRelayController {
     }
 
     pub fn register_space(&self, space_id: &str, channel: u16) -> Result<(), String> {
-        let mut channels = self.channels.lock().map_err(|_| "relay lock poisoned".to_string())?;
+        let mut channels = self
+            .channels
+            .lock()
+            .map_err(|_| "relay lock poisoned".to_string())?;
         channels.insert(
             space_id.to_string(),
             RelayChannelStatus {
@@ -201,16 +215,39 @@ impl MemoryRelayController {
 }
 
 impl RelayController for MemoryRelayController {
+    fn apply_bindings(&self, bindings: &[DeviceBinding]) -> Result<(), String> {
+        let mut channels = self
+            .channels
+            .lock()
+            .map_err(|_| "relay lock poisoned".to_string())?;
+        let mut replacement = HashMap::new();
+        for binding in bindings.iter().filter(|binding| binding.enabled) {
+            let status = channels
+                .get(&binding.space_id)
+                .filter(|status| status.channel == binding.relay_channel)
+                .cloned()
+                .unwrap_or_else(|| RelayChannelStatus {
+                    space_id: binding.space_id.clone(),
+                    channel: binding.relay_channel,
+                    output_active: false,
+                    alarm_requested: false,
+                    last_triggered_at: None,
+                    auto_muted: false,
+                });
+            replacement.insert(binding.space_id.clone(), status);
+        }
+        *channels = replacement;
+        Ok(())
+    }
+
     fn set_alarm(&self, space_id: &str, enabled: bool) -> Result<(), String> {
-        let mut channels = self.channels.lock().map_err(|_| "relay lock poisoned".to_string())?;
-        let entry = channels.entry(space_id.to_string()).or_insert_with(|| RelayChannelStatus {
-            space_id: space_id.to_string(),
-            channel: 0,
-            output_active: false,
-            alarm_requested: false,
-            last_triggered_at: None,
-            auto_muted: false,
-        });
+        let mut channels = self
+            .channels
+            .lock()
+            .map_err(|_| "relay lock poisoned".to_string())?;
+        let entry = channels
+            .get_mut(space_id)
+            .ok_or_else(|| format!("relay channel for space {space_id} is not configured"))?;
 
         if enabled {
             if !entry.alarm_requested {
@@ -229,7 +266,10 @@ impl RelayController for MemoryRelayController {
     }
 
     fn snapshot(&self) -> Result<HashMap<String, bool>, String> {
-        let channels = self.channels.lock().map_err(|_| "relay lock poisoned".to_string())?;
+        let channels = self
+            .channels
+            .lock()
+            .map_err(|_| "relay lock poisoned".to_string())?;
         Ok(channels
             .iter()
             .map(|(k, v)| (k.clone(), v.output_active))
@@ -237,12 +277,18 @@ impl RelayController for MemoryRelayController {
     }
 
     fn detailed_snapshot(&self) -> Result<HashMap<String, RelayChannelStatus>, String> {
-        let channels = self.channels.lock().map_err(|_| "relay lock poisoned".to_string())?;
+        let channels = self
+            .channels
+            .lock()
+            .map_err(|_| "relay lock poisoned".to_string())?;
         Ok(channels.clone())
     }
 
     fn tick_timeout_protection(&self, max_alarm_duration_seconds: i64) -> Result<(), String> {
-        let mut channels = self.channels.lock().map_err(|_| "relay lock poisoned".to_string())?;
+        let mut channels = self
+            .channels
+            .lock()
+            .map_err(|_| "relay lock poisoned".to_string())?;
         let now = Utc::now();
         for status in channels.values_mut() {
             if status.alarm_requested && status.output_active {
@@ -265,6 +311,7 @@ pub struct ModbusTcpRelayController {
     unit_id: u8,
     space_to_channel: Mutex<HashMap<String, u16>>,
     memory_state: MemoryRelayController,
+    tx_counter: AtomicU16,
 }
 
 impl ModbusTcpRelayController {
@@ -274,6 +321,17 @@ impl ModbusTcpRelayController {
             unit_id,
             space_to_channel: Mutex::new(HashMap::new()),
             memory_state: MemoryRelayController::new(),
+            tx_counter: AtomicU16::new(1),
+        }
+    }
+
+    fn next_tx_id(&self) -> u16 {
+        let prev = self.tx_counter.fetch_add(1, Ordering::SeqCst);
+        if prev == 0 {
+            self.tx_counter.store(2, Ordering::SeqCst);
+            1
+        } else {
+            prev
         }
     }
 
@@ -288,7 +346,6 @@ impl ModbusTcpRelayController {
     }
 
     fn send_modbus_tcp_write(&self, channel: u16, state: bool) -> Result<(), String> {
-        let frame = ModbusFrame::build_tcp_write_coil(1, self.unit_id, channel, state);
         let mut stream = TcpStream::connect_timeout(&self.server_addr, Duration::from_millis(1500))
             .map_err(|e| format!("无法连接 Modbus TCP 设备 {}: {}", self.server_addr, e))?;
         stream
@@ -298,28 +355,86 @@ impl ModbusTcpRelayController {
             .set_write_timeout(Some(Duration::from_millis(1500)))
             .map_err(|e| e.to_string())?;
 
+        // 1. 发送写单个线圈指令 (0x05) 并严格校验响应与事务号
+        let write_tx = self.next_tx_id();
+        let frame = ModbusFrame::build_tcp_write_coil(write_tx, self.unit_id, channel, state);
         stream
             .write_all(&frame)
-            .map_err(|e| format!("发送 Modbus 指令失败: {}", e))?;
+            .map_err(|e| format!("发送 Modbus TCP 写线圈指令失败: {}", e))?;
 
         let mut buffer = [0u8; 32];
         let bytes_read = stream
             .read(&mut buffer)
             .map_err(|e| format!("读取 Modbus TCP 响应超时或失败: {}", e))?;
-        ModbusFrame::parse_tcp_response(&buffer[..bytes_read], 1)?;
+        ModbusFrame::parse_tcp_response(&buffer[..bytes_read], write_tx)?;
+
+        // 2. 写后回读物理状态校验 (0x01 Read Coils Verification)
+        let read_tx = self.next_tx_id();
+        let read_frame = ModbusFrame::build_tcp_read_coils(read_tx, self.unit_id, channel, 1);
+        stream
+            .write_all(&read_frame)
+            .map_err(|e| format!("发送 Modbus TCP 回读线圈指令失败: {}", e))?;
+
+        let bytes_read = stream
+            .read(&mut buffer)
+            .map_err(|e| format!("读取 Modbus TCP 回读响应超时或失败: {}", e))?;
+        let pdu = ModbusFrame::parse_tcp_response(&buffer[..bytes_read], read_tx)?;
+        if pdu.len() < 3 || pdu[0] != 0x01 {
+            return Err("Modbus TCP 回读线圈响应格式异常".into());
+        }
+        let actual_state = (pdu[2] & 0x01) != 0;
+        if actual_state != state {
+            return Err(format!(
+                "Modbus TCP 线圈 {} 回读校验失败: 期望 {}, 实际状态 {}",
+                channel, state, actual_state
+            ));
+        }
+
         Ok(())
     }
 }
 
 impl RelayController for ModbusTcpRelayController {
+    fn apply_bindings(&self, bindings: &[DeviceBinding]) -> Result<(), String> {
+        let replacement: HashMap<String, u16> = bindings
+            .iter()
+            .filter(|binding| binding.enabled)
+            .map(|binding| (binding.space_id.clone(), binding.relay_channel))
+            .collect();
+        let existing = self
+            .space_to_channel
+            .lock()
+            .map_err(|_| "relay map lock poisoned".to_string())?
+            .clone();
+        let active = self.memory_state.snapshot()?;
+        for (space_id, channel) in &existing {
+            if active.get(space_id).copied().unwrap_or(false)
+                && replacement.get(space_id) != Some(channel)
+            {
+                self.send_modbus_tcp_write(*channel, false)?;
+            }
+        }
+        self.memory_state.apply_bindings(bindings)?;
+        *self
+            .space_to_channel
+            .lock()
+            .map_err(|_| "relay map lock poisoned".to_string())? = replacement;
+        Ok(())
+    }
+
     fn set_alarm(&self, space_id: &str, enabled: bool) -> Result<(), String> {
         let channel = {
             let map = self
                 .space_to_channel
                 .lock()
                 .map_err(|_| "relay map lock poisoned".to_string())?;
-            map.get(space_id).copied().unwrap_or(0)
+            map.get(space_id)
+                .copied()
+                .ok_or_else(|| format!("relay channel for space {space_id} is not configured"))?
         };
+
+        let detailed_before = self.memory_state.detailed_snapshot()?;
+        let previous_output = detailed_before.get(space_id).map(|s| s.output_active);
 
         // 更新逻辑状态并应用消警保护
         self.memory_state.set_alarm(space_id, enabled)?;
@@ -329,6 +444,11 @@ impl RelayController for ModbusTcpRelayController {
             .get(space_id)
             .map(|s| s.output_active)
             .unwrap_or(enabled);
+
+        // 若物理触点状态未发生跳变，抑制重复的网络总线指令
+        if previous_output == Some(should_output) {
+            return Ok(());
+        }
 
         // 发送物理 Modbus 信号
         self.send_modbus_tcp_write(channel, should_output)?;
@@ -344,7 +464,24 @@ impl RelayController for ModbusTcpRelayController {
     }
 
     fn tick_timeout_protection(&self, max_alarm_duration_seconds: i64) -> Result<(), String> {
-        self.memory_state.tick_timeout_protection(max_alarm_duration_seconds)
+        let before = self.memory_state.snapshot()?;
+        self.memory_state
+            .tick_timeout_protection(max_alarm_duration_seconds)?;
+        let after = self.memory_state.snapshot()?;
+        let channels = self
+            .space_to_channel
+            .lock()
+            .map_err(|_| "relay map lock poisoned".to_string())?
+            .clone();
+        for (space_id, was_active) in before {
+            if was_active && !after.get(&space_id).copied().unwrap_or(false) {
+                let channel = channels.get(&space_id).copied().ok_or_else(|| {
+                    format!("relay channel for space {space_id} is not configured")
+                })?;
+                self.send_modbus_tcp_write(channel, false)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -403,7 +540,8 @@ impl VoiceFrame {
 
 /// 语音报警器驱动特征
 pub trait VoiceAlarmController: Send + Sync {
-    fn play_voice(&self, space_id: &str, channel: u8, cmd: VoiceAlarmCommand) -> Result<(), String>;
+    fn play_voice(&self, space_id: &str, channel: u8, cmd: VoiceAlarmCommand)
+        -> Result<(), String>;
     fn stop_voice(&self, space_id: &str, channel: u8) -> Result<(), String>;
     fn get_last_command(&self, space_id: &str) -> Option<VoiceAlarmCommand>;
 }
@@ -415,7 +553,12 @@ pub struct MemoryVoiceAlarmController {
 }
 
 impl VoiceAlarmController for MemoryVoiceAlarmController {
-    fn play_voice(&self, space_id: &str, _channel: u8, cmd: VoiceAlarmCommand) -> Result<(), String> {
+    fn play_voice(
+        &self,
+        space_id: &str,
+        _channel: u8,
+        cmd: VoiceAlarmCommand,
+    ) -> Result<(), String> {
         let mut map = self
             .current_commands
             .lock()
@@ -461,7 +604,12 @@ impl DualModeAlarmController {
     }
 
     /// 触发双模告警
-    pub fn trigger_alarm(&self, space_id: &str, violation_type: Option<&str>, enabled: bool) -> Result<(), String> {
+    pub fn trigger_alarm(
+        &self,
+        space_id: &str,
+        violation_type: Option<&str>,
+        enabled: bool,
+    ) -> Result<(), String> {
         let channel = self
             .space_to_channel
             .lock()
@@ -523,10 +671,10 @@ mod tests {
         let frame = ModbusFrame::build_tcp_write_coil(42, 1, 3, false);
         assert_eq!(frame.len(), 12);
         assert_eq!(frame[0], 0x00); // TxID Hi
-        assert_eq!(frame[1], 42);   // TxID Lo
+        assert_eq!(frame[1], 42); // TxID Lo
         assert_eq!(frame[7], 0x05); // Function Code
-        assert_eq!(frame[9], 3);    // Channel 3
-        assert_eq!(frame[10], 0x00);// Value OFF
+        assert_eq!(frame[9], 3); // Channel 3
+        assert_eq!(frame[10], 0x00); // Value OFF
 
         let parsed = ModbusFrame::parse_tcp_response(&frame, 42);
         assert!(parsed.is_ok());
@@ -551,7 +699,12 @@ mod tests {
 
         // 当车辆驶离或合规，消警复位
         controller.set_alarm("A-01", false).unwrap();
-        let reset_status = controller.detailed_snapshot().unwrap().get("A-01").unwrap().clone();
+        let reset_status = controller
+            .detailed_snapshot()
+            .unwrap()
+            .get("A-01")
+            .unwrap()
+            .clone();
         assert!(!reset_status.output_active);
         assert!(!reset_status.auto_muted);
         assert!(!reset_status.alarm_requested);
@@ -574,13 +727,20 @@ mod tests {
         dual.bind_space("A-01", 0);
 
         // 触发燃油车违规：继电器触点闭合 + 语音播报音轨 1
-        dual.trigger_alarm("A-01", Some("FUEL_VEHICLE"), true).unwrap();
+        dual.trigger_alarm("A-01", Some("FUEL_VEHICLE"), true)
+            .unwrap();
         assert_eq!(relay.snapshot().unwrap().get("A-01"), Some(&true));
-        assert_eq!(voice.get_last_command("A-01"), Some(VoiceAlarmCommand::FuelVehicleViolation));
+        assert_eq!(
+            voice.get_last_command("A-01"),
+            Some(VoiceAlarmCommand::FuelVehicleViolation)
+        );
 
         // 车辆离场消警：继电器断开 + 语音停止
         dual.trigger_alarm("A-01", None, false).unwrap();
         assert_eq!(relay.snapshot().unwrap().get("A-01"), Some(&false));
-        assert_eq!(voice.get_last_command("A-01"), Some(VoiceAlarmCommand::Stop));
+        assert_eq!(
+            voice.get_last_command("A-01"),
+            Some(VoiceAlarmCommand::Stop)
+        );
     }
 }

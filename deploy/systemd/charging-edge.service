@@ -4,24 +4,38 @@ After=network.target network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
-User=root
+Type=notify
+User=chongdian
+Group=chongdian
 WorkingDirectory=/opt/chongdian
 ExecStart=/opt/chongdian/charging-space-edge
 Restart=always
 RestartSec=3s
-WatchdogSec=30s
+# systemd watchdog 与 sd_notify 心跳监控 (15秒超时)
+WatchdogSec=15s
 
 # 工业边缘工控机高可用与系统资源优化
 LimitNOFILE=65535
 OOMScoreAdjust=-500
 TimeoutStopSec=15s
 
+# 安全加固：最小权限运行
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/chongdian
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
 # 环境变量
 Environment=RUST_LOG=info
-Environment=EDGE_DATA_DIR=/var/lib/chongdian/data
-Environment=EDGE_NODE_ID=edge-station-01
-Environment=EDGE_CLOUD_URL=http://192.168.1.100:8080
+EnvironmentFile=/etc/chongdian/edge.env
 
 [Install]
 WantedBy=multi-user.target

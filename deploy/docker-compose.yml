@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # 1. 关系型持久化数据库 (PostgreSQL 16，兼容信创/ANSI SQL)
   postgres:
@@ -9,12 +7,9 @@ services:
     environment:
       POSTGRES_DB: chongdian
       POSTGRES_USER: chongdian
-      POSTGRES_PASSWORD: chongdian_secret_pwd
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${DB_PASS:?Set DB_PASS in the environment}
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ../cloud-platform/src/main/resources/schema-ansi.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U chongdian"]
       interval: 5s
@@ -24,38 +19,129 @@ services:
   # 2. 云端综合管控平台 (Spring Boot 3.4 / Java 21)
   cloud-platform:
     build:
-      context: ../cloud-platform
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: cloud-platform/Dockerfile
     container_name: chongdian-cloud
     restart: always
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      SPRING_PROFILES_ACTIVE: default
+      SPRING_PROFILES_ACTIVE: postgres
       SERVER_PORT: 8080
-    ports:
-      - "8080:8080"
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: chongdian
+      DB_USER: chongdian
+      DB_PASS: ${DB_PASS:?Set DB_PASS in the environment}
+      CLOUD_STORAGE_MODE: postgres
+      CLOUD_DATA_DIR: /app/data/cloud_store
+      CLOUD_SECURITY_ENABLED: ${CLOUD_SECURITY_ENABLED:-true}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:?Set ADMIN_USERNAME in the environment}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in the environment}
+      OPERATOR_USERNAME: ${OPERATOR_USERNAME:-}
+      OPERATOR_PASSWORD: ${OPERATOR_PASSWORD:-}
+      EDGE_API_KEY: ${EDGE_API_KEY:?Set EDGE_API_KEY in the environment}
+      EDGE_UPGRADE_SECRET: ${EDGE_UPGRADE_SECRET:?Set EDGE_UPGRADE_SECRET in the environment}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
     volumes:
-      - cloud_data:/data/cloud_store
+      - cloud_data:/app/data
+    ports:
+      - "${BIND_IP:-0.0.0.0}:${CLOUD_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/api/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 1g
+    cpus: 1.5
+    pids_limit: 256
 
-  # 3. 边缘计算工控机服务 (Rust 1.95 编译)
+  # 3. 边缘计算工控机核心网关 (Rust)
   edge-node:
     build:
       context: ../edge-node
       dockerfile: Dockerfile
     container_name: chongdian-edge
     restart: always
-    privileged: true # 允许访问串口 /dev/ttyUSB* 与看门狗 /dev/watchdog
+    depends_on:
+      cloud-platform:
+        condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
     environment:
-      EDGE_NODE_ID: edge-host-01
-      EDGE_CLOUD_URL: http://cloud-platform:8080
+      EDGE_NODE_ID: ${EDGE_NODE_ID:-edge-i3-01}
+      EDGE_CLOUD_URL: ${EDGE_CLOUD_URL:-http://cloud-platform:8080}
       EDGE_DATA_DIR: /data/edge
+      EDGE_API_KEY: ${EDGE_API_KEY:?Set EDGE_API_KEY in the environment}
+      EDGE_LOCAL_API_KEY: ${EDGE_LOCAL_API_KEY:-}
+      EDGE_LAN_IP: ${EDGE_LAN_IP:-}
+      EDGE_ENTER_CONFIRM_SECONDS: ${EDGE_ENTER_CONFIRM_SECONDS:-2}
+      EDGE_LEAVE_CONFIRM_SECONDS: ${EDGE_LEAVE_CONFIRM_SECONDS:-3}
+      EDGE_UPGRADE_SECRET: ${EDGE_UPGRADE_SECRET:?Set EDGE_UPGRADE_SECRET in the environment}
+      EDGE_HARDWARE_MODE: ${EDGE_HARDWARE_MODE:-mock}
+      EDGE_STRICT_HARDWARE: ${EDGE_STRICT_HARDWARE:-false}
+      EDGE_MODBUS_TCP_ADDR: ${EDGE_MODBUS_TCP_ADDR:-}
+      EDGE_MODBUS_RTU_PORT: ${EDGE_MODBUS_RTU_PORT:-}
+      EDGE_MODBUS_SLAVE_ID: ${EDGE_MODBUS_SLAVE_ID:-1}
+      EDGE_MODBUS_BAUD_RATE: ${EDGE_MODBUS_BAUD_RATE:-9600}
+      EDGE_VISION_MODE: ${EDGE_VISION_MODE:-external}
+      EDGE_STREAM_MODE: ${EDGE_STREAM_MODE:-REAL}
+      EDGE_AI_ENGINE: ${EDGE_AI_ENGINE:-python-hyperlpr3}
+      EDGE_GB28181_PASSWORD: ${EDGE_GB28181_PASSWORD:-}
     ports:
-      - "8081:8081"
+      - "${BIND_IP:-0.0.0.0}:${EDGE_PORT:-18081}:8081"
+      - "${EDGE_GB28181_SIP_BIND_IP:-127.0.0.1}:5060:5060/udp"
     volumes:
       - edge_data:/data/edge
-      - /dev:/dev
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8081/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    mem_limit: 512m
+    cpus: 2.0
+    pids_limit: 128
+
+  # 4. Python RTSP 实时视频拉流与车牌号/车牌颜色 AI 识别边车
+  vision-service:
+    build:
+      context: ../vision-service
+      dockerfile: Dockerfile
+    container_name: chongdian-vision
+    restart: unless-stopped
+    depends_on:
+      edge-node:
+        condition: service_healthy
+    environment:
+      EDGE_URL: http://edge-node:8081
+      EDGE_LOCAL_API_KEY: ${EDGE_LOCAL_API_KEY:-}
+      VISION_TARGET_POLL_SECONDS: ${VISION_TARGET_POLL_SECONDS:-10}
+      VISION_INFER_FPS: ${VISION_INFER_FPS:-1.0}
+      VISION_SNAPSHOT_SECONDS: ${VISION_SNAPSHOT_SECONDS:-5.0}
+      VISION_MIN_CONFIDENCE: ${VISION_MIN_CONFIDENCE:-0.72}
+      VISION_VOTE_WINDOW: ${VISION_VOTE_WINDOW:-5}
+      VISION_VOTE_MIN_HITS: ${VISION_VOTE_MIN_HITS:-2}
+      VISION_EMPTY_CLEAR_FRAMES: ${VISION_EMPTY_CLEAR_FRAMES:-4}
+      VISION_RTSP_TRANSPORT: ${VISION_RTSP_TRANSPORT:-tcp}
+      VISION_HEALTH_PORT: 8090
+      VISION_CAMERAS_JSON: ${VISION_CAMERAS_JSON:-}
+    ports:
+      - "${BIND_IP:-127.0.0.1}:${VISION_PORT:-18090}:8090"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8090/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 2g
+    cpus: 2.5
+    pids_limit: 128
 
 volumes:
   pgdata:

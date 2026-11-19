@@ -34,6 +34,24 @@ pub use pipeline::*;
 pub mod watchdog;
 pub use watchdog::*;
 
+pub mod gb28181;
+pub use gb28181::*;
+
+pub mod rtsp;
+pub use rtsp::*;
+
+pub mod ai;
+pub use ai::*;
+
+pub mod decoder;
+pub use decoder::*;
+
+pub mod upgrade;
+pub use upgrade::*;
+
+pub mod metrics;
+pub use metrics::*;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum VehicleType {
@@ -54,6 +72,17 @@ pub enum ChargerStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum StalenessStatus {
+    #[default]
+    Fresh,
+    Stale(u64),
+    Disconnected,
+    Fault,
+    Completed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChargerSnapshot {
@@ -65,6 +94,12 @@ pub struct ChargerSnapshot {
     pub completed_at: Option<DateTime<Utc>>,
     pub observed_at: DateTime<Utc>,
     pub provider: String,
+    #[serde(default)]
+    pub raw_timestamp: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub staleness_status: StalenessStatus,
+    #[serde(default)]
+    pub is_simulated: bool,
 }
 
 pub trait ChargerAdapter: Send + Sync {
@@ -78,36 +113,80 @@ pub struct MemoryChargerAdapter {
 
 impl MemoryChargerAdapter {
     pub fn apply_bindings(&self, bindings: &[DeviceBinding]) -> Result<(), String> {
-        let mut snapshots = self.snapshots.lock().map_err(|_| "charger lock poisoned".to_string())?;
-        snapshots.retain(|space_id, _| bindings.iter().any(|binding| binding.enabled && binding.space_id == *space_id));
+        let mut snapshots = self
+            .snapshots
+            .lock()
+            .map_err(|_| "charger lock poisoned".to_string())?;
+        snapshots.retain(|space_id, _| {
+            bindings
+                .iter()
+                .any(|binding| binding.enabled && binding.space_id == *space_id)
+        });
+        let now = Utc::now();
         for binding in bindings.iter().filter(|binding| binding.enabled) {
-            snapshots.entry(binding.space_id.clone()).or_insert_with(|| ChargerSnapshot {
-                charger_id: binding.charger_id.clone(),
-                space_id: binding.space_id.clone(),
-                status: ChargerStatus::Unknown,
-                session_id: None,
-                started_at: None,
-                completed_at: None,
-                observed_at: Utc::now(),
-                provider: "memory".into(),
-            });
+            let brand_or_proto = binding
+                .charger_brand
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+                .cloned()
+                .or_else(|| {
+                    binding
+                        .protocol_id
+                        .as_ref()
+                        .filter(|s| !s.trim().is_empty())
+                        .cloned()
+                })
+                .unwrap_or_else(|| "memory".into());
+
+            snapshots
+                .entry(binding.space_id.clone())
+                .and_modify(|s| {
+                    s.provider = brand_or_proto.clone();
+                    if s.status == ChargerStatus::Unknown {
+                        s.status = ChargerStatus::Idle;
+                    }
+                })
+                .or_insert_with(|| ChargerSnapshot {
+                    charger_id: binding.charger_id.clone(),
+                    space_id: binding.space_id.clone(),
+                    status: ChargerStatus::Idle,
+                    session_id: None,
+                    started_at: None,
+                    completed_at: None,
+                    observed_at: now,
+                    provider: brand_or_proto,
+                    raw_timestamp: None,
+                    staleness_status: StalenessStatus::Fresh,
+                    is_simulated: false,
+                });
         }
         Ok(())
     }
 
     pub fn update(&self, snapshot: ChargerSnapshot) -> Result<(), String> {
-        self.snapshots.lock().map_err(|_| "charger lock poisoned".to_string())?.insert(snapshot.space_id.clone(), snapshot);
+        self.snapshots
+            .lock()
+            .map_err(|_| "charger lock poisoned".to_string())?
+            .insert(snapshot.space_id.clone(), snapshot);
         Ok(())
     }
 
     pub fn snapshots(&self) -> Result<Vec<ChargerSnapshot>, String> {
-        self.snapshots.lock().map(|snapshots| snapshots.values().cloned().collect()).map_err(|_| "charger lock poisoned".to_string())
+        self.snapshots
+            .lock()
+            .map(|snapshots| snapshots.values().cloned().collect())
+            .map_err(|_| "charger lock poisoned".to_string())
     }
 }
 
 impl ChargerAdapter for MemoryChargerAdapter {
     fn snapshot(&self, space_id: &str) -> Result<ChargerSnapshot, String> {
-        self.snapshots.lock().map_err(|_| "charger lock poisoned".to_string())?.get(space_id).cloned().ok_or_else(|| format!("charger for space {space_id} is not configured"))
+        self.snapshots
+            .lock()
+            .map_err(|_| "charger lock poisoned".to_string())?
+            .get(space_id)
+            .cloned()
+            .ok_or_else(|| format!("charger for space {space_id} is not configured"))
     }
 }
 
@@ -133,7 +212,93 @@ pub struct DeviceBinding {
     pub camera_id: String,
     pub charger_id: String,
     pub relay_channel: u16,
+    #[serde(default)]
+    pub speaker_channel: Option<u16>,
     pub enabled: bool,
+    #[serde(default)]
+    pub charger_brand: Option<String>,
+    #[serde(default)]
+    pub protocol_id: Option<String>,
+    #[serde(default)]
+    pub connector_id: Option<String>,
+    #[serde(default)]
+    pub charger_params: Option<String>,
+}
+
+impl Default for DeviceBinding {
+    fn default() -> Self {
+        Self {
+            site_id: "default".into(),
+            space_id: "".into(),
+            camera_id: "".into(),
+            charger_id: "".into(),
+            relay_channel: 0,
+            speaker_channel: None,
+            enabled: true,
+            charger_brand: Some("GENERIC".into()),
+            protocol_id: Some("proto-modbus-tcp".into()),
+            connector_id: Some("1".into()),
+            charger_params: Some("{}".into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WhitelistEntry {
+    pub plate: String,
+    pub vehicle_type: Option<String>,
+    pub reason: Option<String>,
+    pub added_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct WhitelistRegistry {
+    entries: Mutex<HashMap<String, WhitelistEntry>>,
+}
+
+impl WhitelistRegistry {
+    pub fn apply(&self, entries: &[WhitelistEntry]) -> Result<(), String> {
+        let normalized = entries
+            .iter()
+            .cloned()
+            .map(|mut entry| {
+                entry.plate = normalize_plate(&entry.plate);
+                (entry.plate.clone(), entry)
+            })
+            .collect();
+        *self
+            .entries
+            .lock()
+            .map_err(|_| "whitelist lock poisoned".to_string())? = normalized;
+        Ok(())
+    }
+
+    pub fn contains(&self, plate: Option<&str>, now: DateTime<Utc>) -> Result<bool, String> {
+        let Some(plate) = plate else {
+            return Ok(false);
+        };
+        let entries = self
+            .entries
+            .lock()
+            .map_err(|_| "whitelist lock poisoned".to_string())?;
+        Ok(entries.get(&normalize_plate(plate)).is_some_and(|entry| {
+            entry.enabled && entry.expires_at.is_none_or(|expires_at| expires_at > now)
+        }))
+    }
+
+    pub fn snapshot(&self) -> Result<Vec<WhitelistEntry>, String> {
+        self.entries
+            .lock()
+            .map(|entries| entries.values().cloned().collect())
+            .map_err(|_| "whitelist lock poisoned".to_string())
+    }
+}
+
+fn normalize_plate(plate: &str) -> String {
+    plate.trim().to_uppercase()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,6 +308,38 @@ pub enum CameraState {
     Online,
     Offline,
     Error,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraConfigSync {
+    pub camera_id: String,
+    #[serde(default)]
+    pub camera_name: String,
+    #[serde(default)]
+    pub site_id: String,
+    #[serde(default)]
+    pub space_id: String,
+    #[serde(default)]
+    pub node_id: Option<String>,
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub stream_url: String,
+    #[serde(default)]
+    pub sip_device_id: String,
+    #[serde(default)]
+    pub resolution: String,
+    #[serde(default)]
+    pub codec: String,
+    #[serde(default)]
+    pub roi_json: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +352,10 @@ pub struct CameraChannel {
     pub state: CameraState,
     pub stream_url: Option<String>,
     pub last_heartbeat: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub roi_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -201,8 +402,63 @@ impl VideoChannelManager {
                     state: CameraState::Registered,
                     stream_url: None,
                     last_heartbeat: None,
+                    protocol: Some("RTSP".into()),
+                    roi_json: None,
                 });
             entry.space_id = binding.space_id.clone();
+        }
+        Ok(())
+    }
+
+    pub fn apply_configuration_cameras(&self, cameras: &[CameraConfigSync]) -> Result<(), String> {
+        let mut channels = self
+            .channels
+            .lock()
+            .map_err(|_| "camera channel lock poisoned".to_string())?;
+        for cam in cameras.iter().filter(|c| c.enabled && !c.camera_id.trim().is_empty()) {
+            let gb_id = if cam.sip_device_id.trim().is_empty() {
+                cam.camera_id.clone()
+            } else {
+                cam.sip_device_id.clone()
+            };
+            let stream_url = if cam.stream_url.trim().is_empty() {
+                None
+            } else {
+                Some(cam.stream_url.clone())
+            };
+            let roi = if cam.roi_json.trim().is_empty() {
+                None
+            } else {
+                Some(cam.roi_json.clone())
+            };
+            let protocol = if cam.protocol.trim().is_empty() {
+                "RTSP".to_string()
+            } else {
+                cam.protocol.clone()
+            };
+
+            channels
+                .entry(cam.camera_id.clone())
+                .and_modify(|entry| {
+                    if !cam.space_id.trim().is_empty() {
+                        entry.space_id = cam.space_id.clone();
+                    }
+                    entry.gb_device_id = gb_id.clone();
+                    entry.stream_url = stream_url.clone();
+                    entry.protocol = Some(protocol.clone());
+                    entry.roi_json = roi.clone();
+                })
+                .or_insert_with(|| CameraChannel {
+                    camera_id: cam.camera_id.clone(),
+                    channel_id: cam.camera_id.clone(),
+                    space_id: cam.space_id.clone(),
+                    gb_device_id: gb_id,
+                    state: CameraState::Registered,
+                    stream_url,
+                    last_heartbeat: None,
+                    protocol: Some(protocol),
+                    roi_json: roi,
+                });
         }
         Ok(())
     }
@@ -219,8 +475,53 @@ impl VideoChannelManager {
             ));
         }
         channel.state = CameraState::Registered;
+        if channel.protocol.is_none() {
+            channel.protocol = Some("RTSP".into());
+        }
         channels.insert(channel.camera_id.clone(), channel);
         Ok(())
+    }
+
+    pub fn remove(&self, camera_id: &str) -> Result<bool, String> {
+        let mut channels = self
+            .channels
+            .lock()
+            .map_err(|_| "camera channel lock poisoned".to_string())?;
+        Ok(channels.remove(camera_id).is_some())
+    }
+
+    pub fn restore(&self, list: Vec<CameraChannel>) -> Result<(), String> {
+        let mut channels = self
+            .channels
+            .lock()
+            .map_err(|_| "camera channel lock poisoned".to_string())?;
+        for cam in list {
+            channels.insert(cam.camera_id.clone(), cam);
+        }
+        Ok(())
+    }
+
+    pub fn mark_stale_offline(
+        &self,
+        now: DateTime<Utc>,
+        timeout_seconds: i64,
+    ) -> Result<Vec<CameraChannel>, String> {
+        let mut channels = self
+            .channels
+            .lock()
+            .map_err(|_| "camera channel lock poisoned".to_string())?;
+        let mut changed = Vec::new();
+        for ch in channels.values_mut() {
+            if ch.state == CameraState::Online {
+                if let Some(last) = ch.last_heartbeat {
+                    if (now - last).num_seconds() > timeout_seconds {
+                        ch.state = CameraState::Offline;
+                        changed.push(ch.clone());
+                    }
+                }
+            }
+        }
+        Ok(changed)
     }
 
     pub fn heartbeat(&self, camera_id: &str, now: DateTime<Utc>) -> Result<CameraChannel, String> {
@@ -258,25 +559,21 @@ pub struct PlatformConfiguration {
     pub updated_at: DateTime<Utc>,
     pub rules: RuleConfig,
     pub bindings: Vec<DeviceBinding>,
+    #[serde(default)]
+    pub whitelist: Vec<WhitelistEntry>,
+    #[serde(default)]
+    pub cameras: Vec<CameraConfigSync>,
 }
 
 impl Default for PlatformConfiguration {
     fn default() -> Self {
-        let bindings = (1..=6)
-            .map(|i| DeviceBinding {
-                site_id: "site-demo".into(),
-                space_id: format!("A-{i:02}"),
-                camera_id: format!("camera-sim-{i:02}"),
-                charger_id: format!("charger-sim-{i:02}"),
-                relay_channel: (i - 1) as u16,
-                enabled: true,
-            })
-            .collect();
         Self {
             version: 0,
             updated_at: Utc::now(),
             rules: RuleConfig::default(),
-            bindings,
+            bindings: Vec::new(),
+            whitelist: Vec::new(),
+            cameras: Vec::new(),
         }
     }
 }
@@ -284,13 +581,15 @@ impl Default for PlatformConfiguration {
 impl PlatformConfiguration {
     pub fn validate(&self) -> Result<(), String> {
         self.rules.validate()?;
-        if self.bindings.is_empty() || self.bindings.len() > 16 {
+        if self.bindings.len() > 64 {
             return Err(format!(
-                "车位绑定数量 {} 超出范围，系统支持 1 至 16 路车位（现场实施推荐 6~16 位）",
+                "车位绑定数量 {} 超出范围，系统单机最多支持 64 路车位",
                 self.bindings.len()
             ));
         }
         let mut spaces = std::collections::HashSet::new();
+        let mut cameras = std::collections::HashSet::new();
+        let mut chargers = std::collections::HashSet::new();
         let mut channels = std::collections::HashSet::new();
         for binding in &self.bindings {
             for (name, value) in [
@@ -315,11 +614,33 @@ impl PlatformConfiguration {
                     binding.space_id
                 ));
             }
+            if binding.enabled && !cameras.insert(binding.camera_id.clone()) {
+                return Err(format!(
+                    "cameraId {} is assigned to multiple enabled spaces",
+                    binding.camera_id
+                ));
+            }
+            if binding.enabled && !chargers.insert(binding.charger_id.clone()) {
+                return Err(format!(
+                    "chargerId {} is assigned to multiple enabled spaces",
+                    binding.charger_id
+                ));
+            }
             if binding.enabled && !channels.insert(binding.relay_channel) {
                 return Err(format!(
                     "继电器物理通道 {} 被多个启用的车位重复占用",
                     binding.relay_channel
                 ));
+            }
+        }
+        let mut plates = std::collections::HashSet::new();
+        for entry in &self.whitelist {
+            let plate = normalize_plate(&entry.plate);
+            if plate.is_empty() {
+                return Err("whitelist plate must not be blank".into());
+            }
+            if !plates.insert(plate.clone()) {
+                return Err(format!("duplicate whitelist plate {plate}"));
             }
         }
         Ok(())
@@ -514,23 +835,321 @@ pub fn evaluate(input: &EvaluationInput, rules: &RuleConfig) -> EvaluationResult
     base(Decision::Waiting, None, false, "新能源车等待开始充电")
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudEvent {
     pub event_id: Uuid,
+    #[serde(default)]
+    pub session_id: String,
     pub space_id: String,
     pub plate: Option<String>,
     pub vehicle_type: VehicleType,
     pub violation_type: Option<String>,
     pub occurred_at: DateTime<Utc>,
     pub evidence_url: Option<String>,
+    #[serde(default)]
+    pub status: EventStatus,
+    #[serde(default)]
+    pub cleared_at: Option<DateTime<Utc>>,
+    #[serde(default = "Utc::now")]
+    pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone)]
-pub struct EventSpool {
-    directory: PathBuf,
-    max_events: usize,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EventStatus {
+    Open,
+    #[default]
+    Alarming,
+    Cleared,
+    Acknowledged,
+}
+
+#[derive(Debug, Default)]
+pub struct EventLifecycleRegistry {
+    active_by_space: Mutex<HashMap<String, CloudEvent>>,
+}
+
+impl EventLifecycleRegistry {
+    pub fn restore(&self, events: Vec<CloudEvent>) -> Result<(), String> {
+        let restored = events
+            .into_iter()
+            .filter(|event| matches!(event.status, EventStatus::Open | EventStatus::Alarming))
+            .map(|event| (event.space_id.clone(), event))
+            .collect();
+        *self
+            .active_by_space
+            .lock()
+            .map_err(|_| "event lifecycle lock poisoned".to_string())? = restored;
+        Ok(())
+    }
+
+    pub fn process_evaluation(
+        &self,
+        input: &EvaluationInput,
+        result: &mut EvaluationResult,
+        evidence_url: Option<String>,
+    ) -> Result<Vec<CloudEvent>, String> {
+        if result.decision != Decision::Violation {
+            return self.clear_space(&input.space_id, input.now);
+        }
+
+        let session_id = format!(
+            "{}:{}",
+            input.space_id,
+            input.occupied_since.timestamp_millis()
+        );
+        let mut active = self
+            .active_by_space
+            .lock()
+            .map_err(|_| "event lifecycle lock poisoned".to_string())?;
+        let mut changes = Vec::new();
+
+        if let Some(existing) = active.get_mut(&input.space_id) {
+            let same_occupancy = existing.session_id == session_id
+                || (existing.plate == input.plate
+                    && existing.violation_type == result.violation_type);
+            if same_occupancy {
+                result.event_id = existing.event_id;
+                if existing.status == EventStatus::Acknowledged {
+                    result.should_alarm = false;
+                    return Ok(changes);
+                }
+                let new_evidence = existing.evidence_url.is_none() && evidence_url.is_some();
+                let changed = existing.session_id != session_id
+                    || existing.violation_type != result.violation_type
+                    || existing.plate != input.plate
+                    || new_evidence;
+                if changed {
+                    existing.session_id = session_id;
+                    existing.violation_type = result.violation_type.clone();
+                    existing.plate = input.plate.clone();
+                    existing.vehicle_type = input.vehicle_type.clone();
+                    if new_evidence {
+                        existing.evidence_url = evidence_url;
+                    }
+                    existing.status = EventStatus::Alarming;
+                    existing.updated_at = input.now;
+                    changes.push(existing.clone());
+                }
+                return Ok(changes);
+            }
+
+            existing.status = EventStatus::Cleared;
+            existing.cleared_at = Some(input.now);
+            existing.updated_at = input.now;
+            changes.push(existing.clone());
+        }
+
+        let event = CloudEvent {
+            event_id: result.event_id,
+            session_id,
+            space_id: input.space_id.clone(),
+            plate: input.plate.clone(),
+            vehicle_type: input.vehicle_type.clone(),
+            violation_type: result.violation_type.clone(),
+            occurred_at: input.now,
+            evidence_url,
+            status: EventStatus::Alarming,
+            cleared_at: None,
+            updated_at: input.now,
+        };
+        active.insert(input.space_id.clone(), event.clone());
+        changes.push(event);
+        Ok(changes)
+    }
+
+    pub fn acknowledge_space(
+        &self,
+        space_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<CloudEvent>, String> {
+        let mut active = self
+            .active_by_space
+            .lock()
+            .map_err(|_| "event lifecycle lock poisoned".to_string())?;
+        if let Some(event) = active.get_mut(space_id) {
+            event.status = EventStatus::Acknowledged;
+            event.updated_at = now;
+            Ok(Some(event.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn acknowledge_event_by_id(
+        &self,
+        event_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<Option<CloudEvent>, String> {
+        let mut active = self
+            .active_by_space
+            .lock()
+            .map_err(|_| "event lifecycle lock poisoned".to_string())?;
+        for event in active.values_mut() {
+            if event.event_id == event_id {
+                event.status = EventStatus::Acknowledged;
+                event.updated_at = now;
+                return Ok(Some(event.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn clear_space(
+        &self,
+        space_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<CloudEvent>, String> {
+        let mut active = self
+            .active_by_space
+            .lock()
+            .map_err(|_| "event lifecycle lock poisoned".to_string())?;
+        let Some(mut event) = active.remove(space_id) else {
+            return Ok(Vec::new());
+        };
+        event.status = EventStatus::Cleared;
+        event.cleared_at = Some(now);
+        event.updated_at = now;
+        Ok(vec![event])
+    }
+
+    pub fn prune_unbound_events(
+        &self,
+        active_space_ids: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<CloudEvent>, String> {
+        let mut active = self
+            .active_by_space
+            .lock()
+            .map_err(|_| "event lifecycle lock poisoned".to_string())?;
+        let active_set: std::collections::HashSet<&str> =
+            active_space_ids.iter().map(|s| s.as_str()).collect();
+        let mut cleared = Vec::new();
+        active.retain(|space_id, event| {
+            if !active_set.contains(space_id.as_str()) {
+                let mut ev = event.clone();
+                ev.status = EventStatus::Cleared;
+                ev.cleared_at = Some(now);
+                ev.updated_at = now;
+                cleared.push(ev);
+                false
+            } else {
+                true
+            }
+        });
+        Ok(cleared)
+    }
+
+    pub fn active_event(&self, space_id: &str) -> Result<Option<CloudEvent>, String> {
+        self.active_by_space
+            .lock()
+            .map(|events| events.get(space_id).cloned())
+            .map_err(|_| "event lifecycle lock poisoned".to_string())
+    }
+
+    pub fn active_events(&self) -> Result<Vec<CloudEvent>, String> {
+        self.active_by_space
+            .lock()
+            .map(|events| events.values().cloned().collect())
+            .map_err(|_| "event lifecycle lock poisoned".to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceRuntimeStatus {
+    pub node_id: String,
+    pub site_id: String,
+    pub space_id: String,
+    pub phase: PresencePhase,
+    pub charger_status: ChargerStatus,
+    pub plate: Option<String>,
+    pub vehicle_type: VehicleType,
+    pub alarming: bool,
+    pub active_event_id: Option<Uuid>,
+    pub observed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub is_simulated: bool,
+    #[serde(default)]
+    pub stream_type: Option<String>,
+    #[serde(default)]
+    pub snapshot_url: Option<String>,
+    #[serde(default)]
+    pub confidence: f64,
+}
+
+#[derive(Debug, Default)]
+pub struct SpaceStatusRegistry {
+    statuses: Mutex<HashMap<String, SpaceRuntimeStatus>>,
+}
+
+impl SpaceStatusRegistry {
+    pub fn apply_bindings(&self, node_id: &str, bindings: &[DeviceBinding]) -> Result<(), String> {
+        let mut statuses = self
+            .statuses
+            .lock()
+            .map_err(|_| "space status lock poisoned".to_string())?;
+        let mut replacement = HashMap::new();
+        for binding in bindings.iter().filter(|binding| binding.enabled) {
+            let status =
+                statuses
+                    .get(&binding.space_id)
+                    .cloned()
+                    .unwrap_or_else(|| SpaceRuntimeStatus {
+                        node_id: node_id.to_string(),
+                        site_id: binding.site_id.clone(),
+                        space_id: binding.space_id.clone(),
+                        phase: PresencePhase::Empty,
+                        charger_status: ChargerStatus::Idle,
+                        plate: None,
+                        vehicle_type: VehicleType::Unknown,
+                        alarming: false,
+                        active_event_id: None,
+                        observed_at: Utc::now(),
+                        is_simulated: false,
+                        stream_type: None,
+                        snapshot_url: None,
+                        confidence: 0.0,
+                    });
+            replacement.insert(
+                binding.space_id.clone(),
+                SpaceRuntimeStatus {
+                    node_id: node_id.to_string(),
+                    site_id: binding.site_id.clone(),
+                    ..status
+                },
+            );
+        }
+        *statuses = replacement;
+        Ok(())
+    }
+
+    pub fn restore(&self, list: Vec<SpaceRuntimeStatus>) -> Result<(), String> {
+        let mut statuses = self
+            .statuses
+            .lock()
+            .map_err(|_| "space status lock poisoned".to_string())?;
+        for st in list {
+            statuses.insert(st.space_id.clone(), st);
+        }
+        Ok(())
+    }
+
+    pub fn update(&self, status: SpaceRuntimeStatus) -> Result<(), String> {
+        self.statuses
+            .lock()
+            .map_err(|_| "space status lock poisoned".to_string())?
+            .insert(status.space_id.clone(), status);
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> Result<Vec<SpaceRuntimeStatus>, String> {
+        self.statuses
+            .lock()
+            .map(|statuses| statuses.values().cloned().collect())
+            .map_err(|_| "space status lock poisoned".to_string())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -617,74 +1236,6 @@ impl RuleConfigStore {
     }
 }
 
-impl EventSpool {
-    pub async fn open(directory: impl AsRef<Path>, max_events: usize) -> std::io::Result<Self> {
-        let directory = directory.as_ref().to_path_buf();
-        tokio::fs::create_dir_all(&directory).await?;
-        Ok(Self {
-            directory,
-            max_events,
-        })
-    }
-
-    pub async fn enqueue(&self, event: &CloudEvent) -> std::io::Result<()> {
-        let mut paths = self.event_paths().await?;
-        while paths.len() >= self.max_events {
-            if let Some(oldest) = paths.first().cloned() {
-                tokio::fs::remove_file(oldest).await?;
-                paths.remove(0);
-            }
-        }
-
-        let name = format!(
-            "{:013}-{}.json",
-            event.occurred_at.timestamp_millis(),
-            event.event_id
-        );
-        let final_path = self.directory.join(&name);
-        let temporary_path = self.directory.join(format!("{}.tmp", name));
-        let bytes = serde_json::to_vec(event).map_err(std::io::Error::other)?;
-        tokio::fs::write(&temporary_path, bytes).await?;
-        tokio::fs::rename(temporary_path, final_path).await
-    }
-
-    pub async fn next(&self) -> std::io::Result<Option<(PathBuf, CloudEvent)>> {
-        let Some(path) = self.event_paths().await?.into_iter().next() else {
-            return Ok(None);
-        };
-        let bytes = tokio::fs::read(&path).await?;
-        let event = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
-        Ok(Some((path, event)))
-    }
-
-    pub async fn acknowledge(&self, path: &Path) -> std::io::Result<()> {
-        if path.parent() != Some(self.directory.as_path()) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "event path is outside spool",
-            ));
-        }
-        tokio::fs::remove_file(path).await
-    }
-
-    pub async fn pending_count(&self) -> std::io::Result<usize> {
-        Ok(self.event_paths().await?.len())
-    }
-
-    async fn event_paths(&self) -> std::io::Result<Vec<PathBuf>> {
-        let mut directory = tokio::fs::read_dir(&self.directory).await?;
-        let mut paths = Vec::new();
-        while let Some(entry) = directory.next_entry().await? {
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) == Some("json") {
-                paths.push(path);
-            }
-        }
-        paths.sort();
-        Ok(paths)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,6 +1301,35 @@ mod tests {
         i.whitelisted = true;
         assert!(!evaluate(&i, &RuleConfig::default()).should_alarm);
     }
+
+    #[test]
+    fn whitelist_registry_normalizes_plate_and_honors_expiry() {
+        let now = Utc::now();
+        let registry = WhitelistRegistry::default();
+        registry
+            .apply(&[
+                WhitelistEntry {
+                    plate: " 粤a12345 ".into(),
+                    vehicle_type: None,
+                    reason: None,
+                    added_at: now,
+                    expires_at: Some(now + chrono::Duration::minutes(1)),
+                    enabled: true,
+                },
+                WhitelistEntry {
+                    plate: "粤B00001".into(),
+                    vehicle_type: None,
+                    reason: None,
+                    added_at: now,
+                    expires_at: Some(now - chrono::Duration::seconds(1)),
+                    enabled: true,
+                },
+            ])
+            .unwrap();
+        assert!(registry.contains(Some("粤A12345"), now).unwrap());
+        assert!(!registry.contains(Some("粤B00001"), now).unwrap());
+        assert!(!registry.contains(None, now).unwrap());
+    }
     #[test]
     fn fault_is_allowed_by_default() {
         assert_eq!(
@@ -765,6 +1345,8 @@ mod tests {
     #[test]
     fn relay_state_is_independent_per_space() {
         let relay = MemoryRelayController::default();
+        relay.register_space("A-01", 0).unwrap();
+        relay.register_space("A-02", 1).unwrap();
         relay.set_alarm("A-01", true).unwrap();
         relay.set_alarm("A-02", false).unwrap();
         let states = relay.snapshot().unwrap();
@@ -773,44 +1355,121 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_rule_configuration() {
-        let mut rules = RuleConfig::default();
-        rules.completed_grace_seconds = -1;
-        assert!(rules.validate().is_err());
-        rules.completed_grace_seconds = 10;
-        rules.fault_status_action = "INVALID".into();
-        assert!(rules.validate().is_err());
+    fn relay_bindings_are_replaced_on_configuration_update() {
+        let relay = MemoryRelayController::default();
+        let binding = |space: &str, channel| DeviceBinding {
+            site_id: "site".into(),
+            space_id: space.into(),
+            camera_id: format!("camera-{space}"),
+            charger_id: format!("charger-{space}"),
+            relay_channel: channel,
+            speaker_channel: None,
+            enabled: true,
+            ..Default::default()
+        };
+        relay.apply_bindings(&[binding("A-01", 0)]).unwrap();
+        relay.set_alarm("A-01", true).unwrap();
+        relay.apply_bindings(&[binding("B-01", 7)]).unwrap();
+        assert!(relay.set_alarm("A-01", true).is_err());
+        assert_eq!(relay.detailed_snapshot().unwrap()["B-01"].channel, 7);
     }
 
-    #[tokio::test]
-    async fn disk_spool_survives_reopen_and_acknowledges() {
-        let directory =
-            std::env::temp_dir().join(format!("charging-edge-spool-{}", Uuid::new_v4()));
-        let event = CloudEvent {
+    #[test]
+    fn lifecycle_deduplicates_and_clears_a_single_occupancy_session() {
+        let lifecycle = EventLifecycleRegistry::default();
+        let mut first_input = input(VehicleType::Fuel, ChargerStatus::Idle, 5);
+        let mut first_result = evaluate(&first_input, &RuleConfig::default());
+        let opened = lifecycle
+            .process_evaluation(&first_input, &mut first_result, None)
+            .unwrap();
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].status, EventStatus::Alarming);
+
+        first_input.now += chrono::Duration::seconds(2);
+        let mut repeated_result = evaluate(&first_input, &RuleConfig::default());
+        let repeated = lifecycle
+            .process_evaluation(&first_input, &mut repeated_result, None)
+            .unwrap();
+        assert!(repeated.is_empty());
+        assert_eq!(repeated_result.event_id, first_result.event_id);
+
+        let cleared = lifecycle
+            .clear_space(&first_input.space_id, first_input.now)
+            .unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0].event_id, first_result.event_id);
+        assert_eq!(cleared[0].status, EventStatus::Cleared);
+        assert!(lifecycle
+            .active_event(&first_input.space_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn lifecycle_restores_active_event_without_creating_duplicate() {
+        let lifecycle = EventLifecycleRegistry::default();
+        let now = Utc::now();
+        let existing = CloudEvent {
             event_id: Uuid::new_v4(),
+            session_id: "A-01:old".into(),
             space_id: "A-01".into(),
             plate: Some("粤A12345".into()),
             vehicle_type: VehicleType::Fuel,
             violation_type: Some("FUEL_VEHICLE".into()),
-            occurred_at: Utc::now(),
+            occurred_at: now - chrono::Duration::minutes(2),
             evidence_url: None,
+            status: EventStatus::Alarming,
+            cleared_at: None,
+            updated_at: now - chrono::Duration::minutes(1),
         };
-        let spool = EventSpool::open(&directory, 10).await.unwrap();
-        spool.enqueue(&event).await.unwrap();
-        assert_eq!(
-            EventSpool::open(&directory, 10)
-                .await
-                .unwrap()
-                .pending_count()
-                .await
-                .unwrap(),
-            1
-        );
-        let (path, restored) = spool.next().await.unwrap().unwrap();
-        assert_eq!(restored.event_id, event.event_id);
-        spool.acknowledge(&path).await.unwrap();
-        assert_eq!(spool.pending_count().await.unwrap(), 0);
-        tokio::fs::remove_dir(&directory).await.unwrap();
+        lifecycle.restore(vec![existing.clone()]).unwrap();
+        let input = input(VehicleType::Fuel, ChargerStatus::Idle, 10);
+        let mut result = evaluate(&input, &RuleConfig::default());
+        let changes = lifecycle
+            .process_evaluation(&input, &mut result, None)
+            .unwrap();
+        assert_eq!(result.event_id, existing.event_id);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].event_id, existing.event_id);
+    }
+
+    #[test]
+    fn space_status_registry_rebinds_without_stale_spaces() {
+        let registry = SpaceStatusRegistry::default();
+        let binding = |space: &str| DeviceBinding {
+            site_id: "site".into(),
+            space_id: space.into(),
+            camera_id: format!("camera-{space}"),
+            charger_id: format!("charger-{space}"),
+            relay_channel: 0,
+            speaker_channel: None,
+            enabled: true,
+            ..Default::default()
+        };
+        registry
+            .apply_bindings("edge-01", &[binding("A-01")])
+            .unwrap();
+        registry
+            .apply_bindings("edge-01", &[binding("B-01")])
+            .unwrap();
+        let statuses = registry.snapshot().unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].space_id, "B-01");
+    }
+
+    #[test]
+    fn rejects_invalid_rule_configuration() {
+        let rules = RuleConfig {
+            completed_grace_seconds: -1,
+            ..RuleConfig::default()
+        };
+        assert!(rules.validate().is_err());
+        let rules = RuleConfig {
+            completed_grace_seconds: 10,
+            fault_status_action: "INVALID".into(),
+            ..RuleConfig::default()
+        };
+        assert!(rules.validate().is_err());
     }
 
     #[tokio::test]
@@ -833,8 +1492,18 @@ mod tests {
             std::env::temp_dir().join(format!("charging-edge-config-{}", Uuid::new_v4()));
         let path = directory.join("configuration.json");
         let (store, mut configuration) = ConfigurationStore::open(&path).await.unwrap();
+        assert!(configuration.bindings.is_empty());
         configuration.version = 4;
-        configuration.bindings[0].space_id = "B-01".into();
+        configuration.bindings.push(DeviceBinding {
+            site_id: "site-1".into(),
+            space_id: "B-01".into(),
+            camera_id: "cam-B-01".into(),
+            charger_id: "chg-B-01".into(),
+            relay_channel: 0,
+            speaker_channel: None,
+            enabled: true,
+            ..Default::default()
+        });
         store.save(&configuration).await.unwrap();
         let (_, restored) = ConfigurationStore::open(&path).await.unwrap();
         assert_eq!(restored.version, 4);
@@ -853,9 +1522,13 @@ mod tests {
             camera_id: "cam-01".into(),
             charger_id: "charger-01".into(),
             relay_channel: 0,
+            speaker_channel: None,
             enabled: true,
+            ..Default::default()
         };
-        manager.apply_bindings(&[first.clone()]).unwrap();
+        manager
+            .apply_bindings(std::slice::from_ref(&first))
+            .unwrap();
         manager.heartbeat("cam-01", Utc::now()).unwrap();
         assert_eq!(manager.snapshot().unwrap()[0].state, CameraState::Online);
         let second = DeviceBinding {
@@ -877,7 +1550,9 @@ mod tests {
                 camera_id: format!("cam-{index:02}"),
                 charger_id: format!("charger-{index:02}"),
                 relay_channel: index,
+                speaker_channel: None,
                 enabled: true,
+                ..Default::default()
             })
             .collect::<Vec<_>>();
         assert!(manager.apply_bindings(&bindings).is_err());
@@ -886,13 +1561,25 @@ mod tests {
     #[test]
     fn memory_charger_adapter_maps_binding_and_updates_status() {
         let adapter = MemoryChargerAdapter::default();
-        let binding = DeviceBinding { site_id: "site".into(), space_id: "A-01".into(), camera_id: "cam-01".into(), charger_id: "charger-01".into(), relay_channel: 0, enabled: true };
+        let binding = DeviceBinding {
+            site_id: "site".into(),
+            space_id: "A-01".into(),
+            camera_id: "cam-01".into(),
+            charger_id: "charger-01".into(),
+            relay_channel: 0,
+            speaker_channel: None,
+            enabled: true,
+            ..Default::default()
+        };
         adapter.apply_bindings(&[binding]).unwrap();
         let mut snapshot = adapter.snapshot("A-01").unwrap();
-        assert_eq!(snapshot.status, ChargerStatus::Unknown);
+        assert_eq!(snapshot.status, ChargerStatus::Idle);
         snapshot.status = ChargerStatus::Charging;
         snapshot.observed_at = Utc::now();
         adapter.update(snapshot).unwrap();
-        assert_eq!(adapter.snapshot("A-01").unwrap().status, ChargerStatus::Charging);
+        assert_eq!(
+            adapter.snapshot("A-01").unwrap().status,
+            ChargerStatus::Charging
+        );
     }
 }

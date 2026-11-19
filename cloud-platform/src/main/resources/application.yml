@@ -1,11 +1,49 @@
 server:
   port: 8080
+  forward-headers-strategy: framework
+  servlet:
+    encoding:
+      charset: UTF-8
+      force: true
+      enabled: true
+    session:
+      cookie:
+        http-only: true
+        same-site: strict
+        secure: ${SESSION_COOKIE_SECURE:false}
+
+app:
+  storage-dir: ${CLOUD_DATA_DIR:data/cloud_store}
+  storage-mode: ${CLOUD_STORAGE_MODE:file}
+  upgrade:
+    secret: ${EDGE_UPGRADE_SECRET:}
+  evidence:
+    max-bytes: ${CLOUD_EVIDENCE_MAX_BYTES:10737418240}
+  security:
+    enabled: ${CLOUD_SECURITY_ENABLED:false}
+    # 管理员账号密码（人机交互登录）
+    admin-username: ${ADMIN_USERNAME:admin}
+    admin-password: ${ADMIN_PASSWORD:}
+    # 操作员账号密码（可选）
+    operator-username: ${OPERATOR_USERNAME:}
+    operator-password: ${OPERATOR_PASSWORD:}
+    # 边缘工控机 HMAC 签名密钥（机器间通信）
+    edge-api-key: ${EDGE_API_KEY:}
+  webhook:
+    url: ${WEBHOOK_URL:}
+    secret: ${WEBHOOK_SECRET:}
+    channel: ${WEBHOOK_CHANNEL:GENERIC}
+    simulated: ${WEBHOOK_SIMULATED:false}
 
 spring:
   application:
     name: charging-cloud-platform
   profiles:
     active: ${ACTIVE_PROFILE:default}
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
 
 ---
 # 默认开发/内存/轻量模式 (零数据库外部依赖，开箱即用)
@@ -13,47 +51,27 @@ spring:
   config:
     activate:
       on-profile: default
+  autoconfigure:
+    exclude: org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
 
 ---
 # PostgreSQL 生产环境配置
 spring:
   config:
     activate:
-      on-profile: pg
+      on-profile: postgres
   datasource:
     driver-class-name: org.postgresql.Driver
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:charging_db}?currentSchema=public
-    username: ${DB_USER:postgres}
-    password: ${DB_PASS:postgres123}
-  jpa:
-    database-platform: org.hibernate.dialect.PostgreSQLDialect
-    hibernate:
-      ddl-auto: update
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:chongdian}?currentSchema=public&characterEncoding=UTF-8&stringtype=unspecified
+    username: ${DB_USER:chongdian}
+    password: ${DB_PASS:}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  application:
+    name: charging-cloud-platform
 
----
-# 人大金仓 (KingbaseES V8/V9) 信创国产化配置
-spring:
-  config:
-    activate:
-      on-profile: kingbase
-  datasource:
-    driver-class-name: com.kingbase8.Driver
-    url: jdbc:kingbase8://${DB_HOST:localhost}:${DB_PORT:54321}/${DB_NAME:charging_db}
-    username: ${DB_USER:SYSTEM}
-    password: ${DB_PASS:kingbase123}
-  jpa:
-    database-platform: org.hibernate.dialect.PostgreSQLDialect
-
----
-# 达梦数据库 (DM8) 信创国产化配置
-spring:
-  config:
-    activate:
-      on-profile: dm8
-  datasource:
-    driver-class-name: dm.jdbc.driver.DmDriver
-    url: jdbc:dm://${DB_HOST:localhost}:${DB_PORT:5236}/${DB_NAME:charging_db}
-    username: ${DB_USER:SYSDBA}
-    password: ${DB_PASS:SYSDBA}
-  jpa:
-    database-platform: org.hibernate.dialect.DmDialect
+app:
+  storage-mode: postgres
+  security:
+    enabled: true

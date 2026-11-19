@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  edge-node:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: edge-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: edge-node
+      - run: cargo fmt -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo run --bin smoke_test
+
+  cloud-platform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud-platform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: cd ../frontend && corepack enable && pnpm install --frozen-lockfile && pnpm build
+      - run: mvn --batch-mode clean verify
+        env:
+          RUN_POSTGRES_TESTS: "true"

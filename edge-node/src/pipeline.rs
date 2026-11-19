@@ -5,6 +5,7 @@ use crate::{
     storage::EvidenceStorage,
     tracker::{PresencePhase, RawDetection, SpaceTrackerRegistry, TransitionEvent},
     ChargerAdapter, ChargerStatus, CloudEvent, EvaluationInput, RuleConfig, VehicleType,
+    WhitelistRegistry,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,8 @@ pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
     pub raw_data: Vec<u8>,
+    pub is_simulated: bool,
+    pub data_source: String,
 }
 
 /// 视频通道配置
@@ -37,9 +40,15 @@ pub struct VideoChannelConfig {
 }
 
 /// 视频流采集器（支持 RTSP 拉流接入与仿真抽帧）
+///
+/// 当配置了 RTSP URL 时，通过 RTSP 客户端拉取实时流并解码为 RGB 帧。
+/// 当配置了 GB28181 设备 ID 时，通过 GB28181 接收器获取视频流。
+/// 未配置真实源时，回退到仿真抽帧模式。
 pub struct FrameGrabber {
     channels: Mutex<HashMap<u8, VideoChannelConfig>>,
     frame_counters: Mutex<HashMap<u8, u64>>,
+    /// 解码后的真实帧缓冲区（从 RTSP/GB28181 接收）
+    decoded_frame_buffer: Mutex<HashMap<u8, VideoFrame>>,
 }
 
 impl FrameGrabber {
@@ -47,6 +56,7 @@ impl FrameGrabber {
         Self {
             channels: Mutex::new(HashMap::new()),
             frame_counters: Mutex::new(HashMap::new()),
+            decoded_frame_buffer: Mutex::new(HashMap::new()),
         }
     }
 
@@ -54,6 +64,18 @@ impl FrameGrabber {
         if let Ok(mut map) = self.channels.lock() {
             map.insert(config.channel_id, config);
         }
+    }
+
+    /// 推送解码后的真实帧（由 RTSP 客户端或 GB28181 接收器调用）
+    pub fn push_decoded_frame(&self, channel_id: u8, frame: VideoFrame) {
+        if let Ok(mut buf) = self.decoded_frame_buffer.lock() {
+            buf.insert(channel_id, frame);
+        }
+    }
+
+    /// 检查通道是否有真实视频源配置
+    fn has_real_source(&self, cfg: &VideoChannelConfig) -> bool {
+        !cfg.rtsp_url.is_empty() || cfg.channel_id.to_string().starts_with("gb")
     }
 
     pub fn grab_frame(&self, channel_id: u8) -> Result<VideoFrame, String> {
@@ -66,6 +88,27 @@ impl FrameGrabber {
             return Err(format!("通道 {} 处于禁用状态", channel_id));
         }
 
+        // 优先使用真实解码帧
+        if self.has_real_source(cfg) {
+            if let Ok(mut buf) = self.decoded_frame_buffer.lock() {
+                if let Some(frame) = buf.remove(&channel_id) {
+                    return Ok(frame);
+                }
+            }
+            // 真实源尚未产生帧：返回占位帧（避免管道阻塞）
+            return Ok(VideoFrame {
+                channel_id: cfg.channel_id,
+                space_id: cfg.space_id.clone(),
+                timestamp: Utc::now(),
+                width: 640,
+                height: 480,
+                raw_data: vec![128u8; 640 * 480 * 3],
+                is_simulated: true,
+                data_source: "REAL_STREAM_WAITING".to_string(),
+            });
+        }
+
+        // 仿真模式：生成带通道元数据的帧数据
         let mut counters = self
             .frame_counters
             .lock()
@@ -73,9 +116,11 @@ impl FrameGrabber {
         let count = counters.entry(channel_id).or_insert(0);
         *count += 1;
 
-        // 生成高保真带通道元数据的帧数据（模拟 JPEG 头部与序列号）
-        let mock_frame_data = format!("FRAME_HEADER_{}_{}_{}", cfg.channel_id, cfg.space_id, *count)
-            .into_bytes();
+        let mock_frame_data = format!(
+            "FRAME_HEADER_{}_{}_{}",
+            cfg.channel_id, cfg.space_id, *count
+        )
+        .into_bytes();
 
         Ok(VideoFrame {
             channel_id: cfg.channel_id,
@@ -84,6 +129,8 @@ impl FrameGrabber {
             width: 1920,
             height: 1080,
             raw_data: mock_frame_data,
+            is_simulated: true,
+            data_source: "MOCK_SIMULATED".to_string(),
         })
     }
 }
@@ -92,6 +139,10 @@ impl Default for FrameGrabber {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn default_detection_data_source() -> String {
+    "AI_INFERENCE".to_string()
 }
 
 /// 车辆与车牌检测结果
@@ -104,6 +155,10 @@ pub struct VehicleDetection {
     pub vehicle_type: VehicleType,
     pub confidence: f32,
     pub roi_box: [f32; 4], // [ymin, xmin, ymax, xmax] 0.0 ~ 1.0
+    #[serde(default)]
+    pub is_simulated: bool,
+    #[serde(default = "default_detection_data_source")]
+    pub data_source: String,
 }
 
 /// AI 推理引擎统一接口（对接 ONNX Runtime / RKNN NPU / 仿真测试引擎）
@@ -153,11 +208,67 @@ impl InferenceEngine for MockInferenceEngine {
             vehicle_type: VehicleType::Unknown,
             confidence: 0.99,
             roi_box: [0.1, 0.1, 0.9, 0.9],
+            is_simulated: true,
+            data_source: "[MOCK_SIMULATED] 录像回放数据集".to_string(),
         })
     }
 
     fn engine_name(&self) -> &str {
         &self.name
+    }
+}
+
+/// 真实视觉推理引擎适配器
+pub struct RealVisualInferenceAdapter {
+    inner: crate::ai::RealVisualInferenceEngine,
+}
+
+impl RealVisualInferenceAdapter {
+    pub fn new() -> Self {
+        Self {
+            inner: crate::ai::RealVisualInferenceEngine::new(),
+        }
+    }
+}
+
+impl Default for RealVisualInferenceAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InferenceEngine for RealVisualInferenceAdapter {
+    fn infer(&self, frame: &VideoFrame) -> Result<VehicleDetection, String> {
+        let det = self
+            .inner
+            .infer_frame(&frame.raw_data, frame.width, frame.height);
+        let vtype = if !det.occupied {
+            VehicleType::Unknown
+        } else if det.is_new_energy {
+            VehicleType::NewEnergy
+        } else {
+            VehicleType::Fuel
+        };
+
+        Ok(VehicleDetection {
+            space_id: frame.space_id.clone(),
+            is_occupied: det.occupied,
+            plate: det.plate_number,
+            vehicle_type: vtype,
+            confidence: det.confidence as f32,
+            roi_box: [
+                det.bbox[1] as f32,
+                det.bbox[0] as f32,
+                (det.bbox[1] + det.bbox[3]) as f32,
+                (det.bbox[0] + det.bbox[2]) as f32,
+            ],
+            is_simulated: det.is_simulated,
+            data_source: det.data_source,
+        })
+    }
+
+    fn engine_name(&self) -> &str {
+        &self.inner.model_version
     }
 }
 
@@ -232,6 +343,7 @@ pub struct VisionAnalysisPipeline {
     sqlite: Option<Arc<SqliteStorage>>,
     storage: Option<Arc<EvidenceStorage>>,
     charger: Option<Arc<dyn ChargerAdapter>>,
+    whitelist: Option<Arc<WhitelistRegistry>>,
 }
 
 impl VisionAnalysisPipeline {
@@ -252,7 +364,13 @@ impl VisionAnalysisPipeline {
             sqlite,
             storage,
             charger,
+            whitelist: None,
         }
+    }
+
+    pub fn with_whitelist(mut self, whitelist: Arc<WhitelistRegistry>) -> Self {
+        self.whitelist = Some(whitelist);
+        self
     }
 
     /// 执行单通道检测周期
@@ -275,6 +393,12 @@ impl VisionAnalysisPipeline {
             vehicle_type: detection.vehicle_type.clone(),
             captured_at: frame.timestamp,
             evidence_image_path: None,
+            is_simulated: detection.is_simulated,
+            data_source: detection.data_source.clone(),
+            confidence: Some(detection.confidence as f64),
+            plate_color: None,
+            camera_id: None,
+            image_base64: None,
         };
 
         let transition = self.tracker.process_detection(&raw, rules)?;
@@ -292,15 +416,25 @@ impl VisionAnalysisPipeline {
                     .map(|s| s.status)
                     .unwrap_or(ChargerStatus::Idle);
 
+                let plate = tr
+                    .candidate_plate
+                    .clone()
+                    .or_else(|| detection.plate.clone());
+                let whitelisted = self
+                    .whitelist
+                    .as_ref()
+                    .map(|registry| registry.contains(plate.as_deref(), frame.timestamp))
+                    .transpose()?
+                    .unwrap_or(false);
                 let eval_input = EvaluationInput {
                     space_id: detection.space_id.clone(),
-                    plate: tr.candidate_plate.clone().or_else(|| detection.plate.clone()),
+                    plate,
                     vehicle_type: tr.candidate_vehicle_type.clone(),
                     charger_status,
                     occupied_since,
                     charge_completed_at: None,
                     now: frame.timestamp,
-                    whitelisted: false,
+                    whitelisted,
                 };
 
                 let eval_result = evaluate(&eval_input, rules);
@@ -312,14 +446,11 @@ impl VisionAnalysisPipeline {
                         .unwrap_or_else(|| "FUEL_VEHICLE".into());
 
                     // 触发双模声光与串口定制语音报警
-                    let _ = self
-                        .alarm
-                        .trigger_alarm(&detection.space_id, Some(&violation_type), true);
+                    let _ =
+                        self.alarm
+                            .trigger_alarm(&detection.space_id, Some(&violation_type), true);
 
-                    let plate_str = eval_input
-                        .plate
-                        .clone()
-                        .unwrap_or_else(|| "UNKNOWN".into());
+                    let plate_str = eval_input.plate.clone().unwrap_or_else(|| "UNKNOWN".into());
 
                     // 打标防篡改证据
                     let evidence = EvidenceWatermark::apply(
@@ -329,27 +460,40 @@ impl VisionAnalysisPipeline {
                         &violation_type,
                     );
 
-                    // 上传证据（若配置对象存储客户端）
+                    // 上传证据（若配置对象存储客户端，自动生成防篡改 Sidecar 元数据）
                     let evidence_url = if let Some(ref storage) = self.storage {
-                        match storage
-                            .upload_evidence(&detection.space_id, &evidence.data, "jpg")
+                        storage
+                            .upload_evidence_with_context(
+                                &detection.space_id,
+                                &evidence.data,
+                                "jpg",
+                                Some(&plate_str),
+                                Some(&violation_type),
+                                detection.is_simulated,
+                            )
                             .await
-                        {
-                            Ok(url) => Some(url),
-                            Err(_) => None,
-                        }
+                            .map(|(url, _)| url)
+                            .ok()
                     } else {
                         None
                     };
 
                     let cloud_event = CloudEvent {
                         event_id: Uuid::new_v4(),
+                        session_id: format!(
+                            "{}:{}",
+                            detection.space_id,
+                            occupied_since.timestamp_millis()
+                        ),
                         space_id: detection.space_id.clone(),
                         plate: Some(plate_str),
                         vehicle_type: eval_input.vehicle_type,
                         violation_type: Some(violation_type),
                         occurred_at: Utc::now(),
                         evidence_url,
+                        status: crate::EventStatus::Alarming,
+                        cleared_at: None,
+                        updated_at: Utc::now(),
                     };
 
                     // 本地 SQLite 暂存
@@ -381,7 +525,10 @@ impl VisionAnalysisPipeline {
 mod tests {
     use super::*;
     use crate::{
-        relay::{MemoryRelayController, MemoryVoiceAlarmController, RelayController, VoiceAlarmController},
+        relay::{
+            MemoryRelayController, MemoryVoiceAlarmController, RelayController,
+            VoiceAlarmController,
+        },
         RuleConfig, VoiceAlarmCommand,
     };
 
@@ -394,6 +541,8 @@ mod tests {
             width: 1920,
             height: 1080,
             raw_data: vec![0xFF, 0xD8, 0xFF, 0xE0], // JPEG 头部
+            is_simulated: false,
+            data_source: "TEST_REAL_CAMERA".to_string(),
         };
 
         let evidence = EvidenceWatermark::apply(&frame, "京A88888", "SPACE-01", "FUEL_VEHICLE");
@@ -425,11 +574,15 @@ mod tests {
                 vehicle_type: VehicleType::Fuel,
                 confidence: 0.98,
                 roi_box: [0.1, 0.1, 0.8, 0.8],
+                is_simulated: false,
+                data_source: "MOCK_INFERENCE".to_string(),
             },
         );
 
-        let mut rules = RuleConfig::default();
-        rules.vehicle_enter_confirm_seconds = 0; // 测试环境无需等待进场确认
+        let mut rules = RuleConfig {
+            vehicle_enter_confirm_seconds: 0,
+            ..RuleConfig::default()
+        };
         let tracker = Arc::new(SpaceTrackerRegistry::new());
 
         let relay_ctrl = Arc::new(MemoryRelayController::new());
@@ -477,11 +630,13 @@ mod tests {
                 vehicle_type: VehicleType::Unknown,
                 confidence: 0.99,
                 roi_box: [0.0; 4],
+                is_simulated: false,
+                data_source: "MOCK_INFERENCE".to_string(),
             },
         );
 
         rules.vehicle_leave_confirm_seconds = 0; // 测试环境立即确认驶离
-        // 第一次驶离进入 Leaving，第二次确认 Empty 驶离消警
+                                                 // 第一次驶离进入 Leaving，第二次确认 Empty 驶离消警
         let _ = pipeline.process_channel(1, &rules).await;
         let _ = pipeline.process_channel(1, &rules).await;
 
@@ -492,5 +647,101 @@ mod tests {
         );
         let relay_snap_after = relay_ctrl.snapshot().unwrap();
         assert_eq!(relay_snap_after.get("SPACE-01"), Some(&false));
+    }
+
+    #[test]
+    fn test_frame_grabber_decoded_frame_buffer() {
+        let grabber = FrameGrabber::new();
+        grabber.register_channel(VideoChannelConfig {
+            channel_id: 1,
+            space_id: "SPACE-01".to_string(),
+            rtsp_url: "rtsp://192.168.1.10:554/ch1".to_string(),
+            fps: 2,
+            enabled: true,
+        });
+
+        // 推送真实解码帧
+        let decoded_frame = VideoFrame {
+            channel_id: 1,
+            space_id: "SPACE-01".to_string(),
+            timestamp: Utc::now(),
+            width: 1920,
+            height: 1080,
+            raw_data: vec![255u8; 1920 * 1080 * 3],
+            is_simulated: false,
+            data_source: "RTSP_DECODED".to_string(),
+        };
+        grabber.push_decoded_frame(1, decoded_frame);
+
+        // 拉取帧应返回真实解码帧
+        let frame = grabber.grab_frame(1).unwrap();
+        assert!(!frame.is_simulated);
+        assert_eq!(frame.width, 1920);
+        assert_eq!(frame.height, 1080);
+        assert_eq!(frame.data_source, "RTSP_DECODED");
+    }
+
+    #[test]
+    fn test_frame_grabber_mock_fallback() {
+        let grabber = FrameGrabber::new();
+        // 注册无 RTSP URL 的通道（仿真模式）
+        grabber.register_channel(VideoChannelConfig {
+            channel_id: 2,
+            space_id: "SPACE-02".to_string(),
+            rtsp_url: String::new(),
+            fps: 2,
+            enabled: true,
+        });
+
+        // 仿真模式应返回模拟帧
+        let frame = grabber.grab_frame(2).unwrap();
+        assert!(frame.is_simulated);
+        assert!(frame.data_source.contains("MOCK"));
+    }
+
+    #[test]
+    fn test_frame_grabber_shared_between_producers_and_consumers() {
+        // 验证 FrameGrabber 可以在多个生产者和消费者之间共享
+        let grabber = Arc::new(FrameGrabber::new());
+        grabber.register_channel(VideoChannelConfig {
+            channel_id: 3,
+            space_id: "SPACE-03".to_string(),
+            rtsp_url: "rtsp://192.168.1.12:554/ch1".to_string(),
+            fps: 2,
+            enabled: true,
+        });
+
+        // 模拟 GB28181 生产者推送帧
+        let gb_frame = VideoFrame {
+            channel_id: 3,
+            space_id: "SPACE-03".to_string(),
+            timestamp: Utc::now(),
+            width: 1920,
+            height: 1080,
+            raw_data: vec![200u8; 1920 * 1080 * 3],
+            is_simulated: false,
+            data_source: "GB28181_DECODED".to_string(),
+        };
+        grabber.push_decoded_frame(3, gb_frame);
+
+        // 模拟 RTSP 生产者推送帧（覆盖）
+        let rtsp_frame = VideoFrame {
+            channel_id: 3,
+            space_id: "SPACE-03".to_string(),
+            timestamp: Utc::now(),
+            width: 1280,
+            height: 720,
+            raw_data: vec![100u8; 1280 * 720 * 3],
+            is_simulated: false,
+            data_source: "RTSP_DECODED".to_string(),
+        };
+        grabber.push_decoded_frame(3, rtsp_frame);
+
+        // 消费者拉取帧（应获取最后推送的帧）
+        let frame = grabber.grab_frame(3).unwrap();
+        assert!(!frame.is_simulated);
+        assert_eq!(frame.width, 1280);
+        assert_eq!(frame.height, 720);
+        assert_eq!(frame.data_source, "RTSP_DECODED");
     }
 }

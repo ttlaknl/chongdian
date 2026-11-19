@@ -1,0 +1,89 @@
+# ==============================================================================
+# Intel i3 (16GB RAM, x86_64 Ubuntu Server) 纯边缘侧独立部署编排文件
+# 使用 host 网络模式，直接连通车场局域网 RTSP 摄像头、Modbus TCP 继电器及物理网卡探针
+# 启动方式：
+#   cd deploy && cp .env.example .env && docker compose -f docker-compose.edge-i3.yml up -d --build
+# ==============================================================================
+services:
+  edge-node:
+    build:
+      context: ../edge-node
+      dockerfile: Dockerfile
+    container_name: chongdian-edge-i3
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    cap_drop:
+      - ALL
+    environment:
+      EDGE_NODE_ID: ${EDGE_NODE_ID:-edge-i3-01}
+      EDGE_CLOUD_URL: ${EDGE_CLOUD_URL:-}
+      EDGE_DATA_DIR: /data/edge
+      EDGE_API_KEY: ${EDGE_API_KEY:-}
+      EDGE_LOCAL_API_KEY: ${EDGE_LOCAL_API_KEY:-}
+      EDGE_UPGRADE_SECRET: ${EDGE_UPGRADE_SECRET:?Set EDGE_UPGRADE_SECRET in the environment}
+      EDGE_HARDWARE_MODE: ${EDGE_HARDWARE_MODE:-mock}
+      EDGE_STRICT_HARDWARE: ${EDGE_STRICT_HARDWARE:-false}
+      EDGE_MODBUS_TCP_ADDR: ${EDGE_MODBUS_TCP_ADDR:-}
+      EDGE_MODBUS_RTU_PORT: ${EDGE_MODBUS_RTU_PORT:-/dev/ttyUSB0}
+      EDGE_MODBUS_SLAVE_ID: ${EDGE_MODBUS_SLAVE_ID:-1}
+      EDGE_MODBUS_BAUD_RATE: ${EDGE_MODBUS_BAUD_RATE:-9600}
+      EDGE_VISION_MODE: ${EDGE_VISION_MODE:-external}
+      EDGE_STREAM_MODE: ${EDGE_STREAM_MODE:-REAL}
+      EDGE_AI_ENGINE: ${EDGE_AI_ENGINE:-python-hyperlpr3}
+      EDGE_GB28181_SIP_PORT: ${EDGE_GB28181_SIP_PORT:-5060}
+      EDGE_GB28181_PASSWORD: ${EDGE_GB28181_PASSWORD:-}
+      EDGE_EVIDENCE_MAX_BYTES: ${EDGE_EVIDENCE_MAX_BYTES:-5368709120}
+      EDGE_DISK_CAPACITY_BYTES: ${EDGE_DISK_CAPACITY_BYTES:-107374182400}
+    volumes:
+      - edge_i3_data:/data/edge
+    tmpfs:
+      - /tmp
+    # 如现场使用物理 RS-485 USB 转串口连接继电器/语音喇叭，取消下面两行注释：
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8081/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    mem_limit: 1g
+    cpus: 2.0
+    pids_limit: 128
+
+  vision-service:
+    build:
+      context: ../vision-service
+      dockerfile: Dockerfile
+    container_name: chongdian-vision-i3
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      edge-node:
+        condition: service_healthy
+    environment:
+      EDGE_URL: http://127.0.0.1:8081
+      EDGE_LOCAL_API_KEY: ${EDGE_LOCAL_API_KEY:-}
+      VISION_TARGET_POLL_SECONDS: ${VISION_TARGET_POLL_SECONDS:-10}
+      VISION_INFER_FPS: ${VISION_INFER_FPS:-1.0}
+      VISION_SNAPSHOT_SECONDS: ${VISION_SNAPSHOT_SECONDS:-5.0}
+      VISION_MIN_CONFIDENCE: ${VISION_MIN_CONFIDENCE:-0.72}
+      VISION_VOTE_WINDOW: ${VISION_VOTE_WINDOW:-5}
+      VISION_VOTE_MIN_HITS: ${VISION_VOTE_MIN_HITS:-2}
+      VISION_EMPTY_CLEAR_FRAMES: ${VISION_EMPTY_CLEAR_FRAMES:-4}
+      VISION_RTSP_TRANSPORT: ${VISION_RTSP_TRANSPORT:-tcp}
+      VISION_HEALTH_PORT: 8090
+      VISION_CAMERAS_JSON: ${VISION_CAMERAS_JSON:-}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8090/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 3g
+    cpus: 3.0
+    pids_limit: 128
+
+volumes:
+  edge_i3_data:

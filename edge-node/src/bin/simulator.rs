@@ -1,5 +1,5 @@
 use charging_space_edge::{
-    evaluate, ChargerStatus, CloudEvent, DualModeAlarmController, EvaluationInput,
+    evaluate, ChargerStatus, CloudEvent, DualModeAlarmController, EvaluationInput, EventStatus,
     HardwareModbusRtuRelayController, MemoryRelayController, MockTransport,
     PhysicalVoiceAlarmController, RelayController, RuleConfig, SqliteStorage, VehicleType,
 };
@@ -16,6 +16,11 @@ async fn main() {
     let now = Utc::now();
     let rules = RuleConfig::default();
     let relay = MemoryRelayController::default();
+    for index in 1..=6 {
+        relay
+            .register_space(&format!("A-{index:02}"), (index - 1) as u16)
+            .expect("register simulator relay binding");
+    }
 
     println!("\n[阶段一] 6 大核心业务场景基线测试：");
     let cases = [
@@ -101,15 +106,24 @@ async fn main() {
         );
         println!(
             "  ✓ 车位: {:<6} | 场景: {:<20} | 判定: {:<12} | 报警: {}",
-            space_id, name, format!("{:?}", result.decision), result.should_alarm
+            space_id,
+            name,
+            format!("{:?}", result.decision),
+            result.should_alarm
         );
     }
 
     println!("\n[阶段二] 6~16 路车位动态全量并发测试 (M4)：");
     let mock_bus = Arc::new(MockTransport::new("SIM_BUS_01", "SERIAL_RS485"));
-    let rtu_relay = Arc::new(HardwareModbusRtuRelayController::new(mock_bus.clone(), 0x01));
+    let rtu_relay = Arc::new(HardwareModbusRtuRelayController::new(
+        mock_bus.clone(),
+        0x01,
+    ));
     let voice_ctrl = Arc::new(PhysicalVoiceAlarmController::new(mock_bus.clone(), 0x01));
-    let dual_alarm = Arc::new(DualModeAlarmController::new(rtu_relay.clone(), voice_ctrl.clone()));
+    let dual_alarm = Arc::new(DualModeAlarmController::new(
+        rtu_relay.clone(),
+        voice_ctrl.clone(),
+    ));
 
     for i in 1..=16 {
         let space_id = format!("SPACE-{:02}", i);
@@ -131,7 +145,10 @@ async fn main() {
     assert_eq!(snap.len(), 16);
     let active_count = snap.values().filter(|&&v| v).count();
     assert_eq!(active_count, 8);
-    println!("  ✓ 16 路车位并发下发 Modbus RTU / 语音帧成功，奇数车位报警激活数: {}/16", active_count);
+    println!(
+        "  ✓ 16 路车位并发下发 Modbus RTU / 语音帧成功，奇数车位报警激活数: {}/16",
+        active_count
+    );
 
     // 全部复位消警
     for i in 1..=16 {
@@ -148,19 +165,26 @@ async fn main() {
     for i in 1..=1000 {
         let ev = CloudEvent {
             event_id: Uuid::new_v4(),
+            session_id: format!("{}:{}", (i % 16) + 1, i),
             space_id: format!("SPACE-{:02}", (i % 16) + 1),
             plate: Some(format!("粤B{:05}", i)),
             vehicle_type: VehicleType::Fuel,
             violation_type: Some("FUEL_VEHICLE".into()),
             occurred_at: now,
             evidence_url: Some(format!("https://oss.example.com/evidence/{}.jpg", i)),
+            status: EventStatus::Alarming,
+            cleared_at: None,
+            updated_at: now,
         };
         sqlite.save_event(&ev).unwrap();
     }
     let elapsed = (Utc::now() - start_insert).num_milliseconds();
     let pending = sqlite.pending_count().unwrap();
     assert_eq!(pending, 1000);
-    println!("  ✓ 1,000 条违规事件入库完成，耗时: {} ms，待同步计数: {}", elapsed, pending);
+    println!(
+        "  ✓ 1,000 条违规事件入库完成，耗时: {} ms，待同步计数: {}",
+        elapsed, pending
+    );
 
     // 模拟网络恢复补传
     let batch = sqlite.fetch_pending_events(100).unwrap();
@@ -170,7 +194,10 @@ async fn main() {
     }
     let remaining = sqlite.pending_count().unwrap();
     assert_eq!(remaining, 900);
-    println!("  ✓ 模拟网络恢复，成功批量捞取 100 条并标记已同步，剩余暂存待传: {}", remaining);
+    println!(
+        "  ✓ 模拟网络恢复，成功批量捞取 100 条并标记已同步，剩余暂存待传: {}",
+        remaining
+    );
 
     println!("\n============================================================");
     println!(">>> 全链路仿真测试全部通过 (ALL 3 PHASES PASSED) SUCCESS <<<");

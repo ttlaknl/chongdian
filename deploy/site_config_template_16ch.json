@@ -1,0 +1,155 @@
+{
+  "version": 1,
+  "updatedAt": "2026-09-08T12:00:00Z",
+  "rules": {
+    "unchargedGraceSeconds": 600,
+    "completedGraceSeconds": 900,
+    "vehicleEnterConfirmSeconds": 3,
+    "vehicleLeaveConfirmSeconds": 5,
+    "alarmRepeatSeconds": 60,
+    "alarmAutoStopSeconds": 300,
+    "unknownVehicleAction": "WAIT",
+    "unknownStatusAction": "WAIT",
+    "faultStatusAction": "ALLOW"
+  },
+  "bindings": [
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-01",
+      "cameraId": "CAM-01-A01",
+      "chargerId": "CHG-01-01",
+      "relayChannel": 0,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-02",
+      "cameraId": "CAM-01-A02",
+      "chargerId": "CHG-01-02",
+      "relayChannel": 1,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-03",
+      "cameraId": "CAM-01-A03",
+      "chargerId": "CHG-02-01",
+      "relayChannel": 2,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-04",
+      "cameraId": "CAM-01-A04",
+      "chargerId": "CHG-02-02",
+      "relayChannel": 3,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-05",
+      "cameraId": "CAM-01-A05",
+      "chargerId": "CHG-03-01",
+      "relayChannel": 4,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-06",
+      "cameraId": "CAM-01-A06",
+      "chargerId": "CHG-03-02",
+      "relayChannel": 5,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-07",
+      "cameraId": "CAM-02-A07",
+      "chargerId": "CHG-04-01",
+      "relayChannel": 6,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-08",
+      "cameraId": "CAM-02-A08",
+      "chargerId": "CHG-04-02",
+      "relayChannel": 7,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-09",
+      "cameraId": "CAM-02-A09",
+      "chargerId": "CHG-05-01",
+      "relayChannel": 8,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-10",
+      "cameraId": "CAM-02-A10",
+      "chargerId": "CHG-05-02",
+      "relayChannel": 9,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-11",
+      "cameraId": "CAM-03-A11",
+      "chargerId": "CHG-06-01",
+      "relayChannel": 10,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-12",
+      "cameraId": "CAM-03-A12",
+      "chargerId": "CHG-06-02",
+      "relayChannel": 11,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-13",
+      "cameraId": "CAM-03-A13",
+      "chargerId": "CHG-07-01",
+      "relayChannel": 12,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-14",
+      "cameraId": "CAM-03-A14",
+      "chargerId": "CHG-07-02",
+      "relayChannel": 13,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-15",
+      "cameraId": "CAM-04-A15",
+      "chargerId": "CHG-08-01",
+      "relayChannel": 14,
+      "enabled": true
+    },
+    {
+      "siteId": "SITE-SH-001",
+      "spaceId": "A-16",
+      "cameraId": "CAM-04-A16",
+      "chargerId": "CHG-08-02",
+      "relayChannel": 15,
+      "enabled": true
+    }
+  ],
+  "whitelist": [
+    {
+      "plate": "粤B99999",
+      "vehicleType": "FUEL",
+      "reason": "现场巡检与运维特种工程车",
+      "addedAt": "2026-09-08T00:00:00Z",
+      "expiresAt": null,
+      "enabled": true
+    }
+  ]
+}

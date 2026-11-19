@@ -3,3 +3,10 @@
 *.log
 .idea/
 .vscode/
+frontend/node_modules/
+**/.env
+*.jpg
+*.jpeg
+*.png
+cookies.txt
+

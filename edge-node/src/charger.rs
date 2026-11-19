@@ -1,4 +1,4 @@
-use crate::{ChargerAdapter, ChargerSnapshot, ChargerStatus, DeviceBinding};
+use crate::{ChargerAdapter, ChargerSnapshot, ChargerStatus, DeviceBinding, StalenessStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,6 +17,12 @@ pub struct ExternalChargerUpdate {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub provider: Option<String>,
+    #[serde(default)]
+    pub raw_timestamp: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub staleness_status: Option<StalenessStatus>,
+    #[serde(default)]
+    pub is_simulated: bool,
 }
 
 /// 统一智能充电桩适配器（支持多桩状态汇聚、心跳超时离线检测与软降级）
@@ -48,26 +54,72 @@ impl DynamicChargerAdapter {
             .snapshots
             .lock()
             .map_err(|_| "charger lock poisoned".to_string())?;
-        snapshots.retain(|space_id, _| {
-            bindings
-                .iter()
-                .any(|binding| binding.enabled && binding.space_id == *space_id)
-        });
+        let mut heartbeats = self
+            .last_heartbeat
+            .lock()
+            .map_err(|_| "charger heartbeat lock poisoned".to_string())?;
+        let mut replacement = HashMap::new();
+        let now = Utc::now();
         for binding in bindings.iter().filter(|binding| binding.enabled) {
-            snapshots
-                .entry(binding.space_id.clone())
-                .or_insert_with(|| ChargerSnapshot {
+            let brand_or_proto = binding
+                .charger_brand
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+                .cloned()
+                .or_else(|| {
+                    binding
+                        .protocol_id
+                        .as_ref()
+                        .filter(|s| !s.trim().is_empty())
+                        .cloned()
+                })
+                .unwrap_or_else(|| "external-api".into());
+
+            let snapshot = snapshots
+                .get(&binding.space_id)
+                .filter(|snapshot| snapshot.charger_id == binding.charger_id)
+                .cloned()
+                .map(|mut s| {
+                    s.provider = brand_or_proto.clone();
+                    if s.status == ChargerStatus::Unknown {
+                        s.status = ChargerStatus::Idle;
+                    }
+                    s
+                })
+                .unwrap_or_else(|| ChargerSnapshot {
                     charger_id: binding.charger_id.clone(),
                     space_id: binding.space_id.clone(),
-                    status: ChargerStatus::Unknown,
+                    status: ChargerStatus::Idle,
                     session_id: None,
                     started_at: None,
                     completed_at: None,
-                    observed_at: Utc::now(),
-                    provider: "dynamic-hub".into(),
+                    observed_at: now,
+                    provider: brand_or_proto,
+                    raw_timestamp: None,
+                    staleness_status: StalenessStatus::Fresh,
+                    is_simulated: false,
                 });
+            replacement.insert(binding.space_id.clone(), snapshot);
         }
+        let active_chargers = replacement
+            .values()
+            .map(|snapshot| snapshot.charger_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        heartbeats.retain(|charger_id, _| active_chargers.contains(charger_id));
+        *snapshots = replacement;
         Ok(())
+    }
+
+    /// 刷新处于待充或正常状态的充电桩观测时间
+    pub fn touch_heartbeats(&self) {
+        if let Ok(mut snapshots) = self.snapshots.lock() {
+            let now = Utc::now();
+            for snapshot in snapshots.values_mut() {
+                if snapshot.status == ChargerStatus::Idle || snapshot.status == ChargerStatus::Preparing {
+                    snapshot.observed_at = now;
+                }
+            }
+        }
     }
 
     /// 更新充电桩实时快照
@@ -85,12 +137,20 @@ impl DynamicChargerAdapter {
         let snapshot = ChargerSnapshot {
             charger_id: update.charger_id.clone(),
             space_id: update.space_id.clone(),
-            status: update.status,
+            status: update.status.clone(),
             session_id: update.session_id,
             started_at: update.started_at,
             completed_at: update.completed_at,
             observed_at: now,
             provider: update.provider.unwrap_or_else(|| "external-api".into()),
+            raw_timestamp: update.raw_timestamp,
+            staleness_status: update.staleness_status.unwrap_or(match update.status {
+                ChargerStatus::Offline => StalenessStatus::Disconnected,
+                ChargerStatus::Fault => StalenessStatus::Fault,
+                ChargerStatus::Completed => StalenessStatus::Completed,
+                _ => StalenessStatus::Fresh,
+            }),
+            is_simulated: update.is_simulated,
         };
 
         snapshots.insert(update.space_id.clone(), snapshot);
@@ -118,6 +178,7 @@ impl DynamicChargerAdapter {
                 {
                     snapshot.status = ChargerStatus::Offline;
                     snapshot.observed_at = now;
+                    snapshot.staleness_status = StalenessStatus::Disconnected;
                     degraded_spaces.push(space_id.clone());
                 }
             }
@@ -130,6 +191,17 @@ impl DynamicChargerAdapter {
             .lock()
             .map(|s| s.values().cloned().collect())
             .map_err(|_| "charger lock poisoned".to_string())
+    }
+
+    pub fn restore_snapshots(&self, list: Vec<ChargerSnapshot>) -> Result<(), String> {
+        let mut snapshots = self
+            .snapshots
+            .lock()
+            .map_err(|_| "charger lock poisoned".to_string())?;
+        for snap in list {
+            snapshots.insert(snap.space_id.clone(), snap);
+        }
+        Ok(())
     }
 }
 
@@ -158,12 +230,17 @@ mod tests {
             camera_id: "cam-01".into(),
             charger_id: "chg-01".into(),
             relay_channel: 0,
+            speaker_channel: None,
             enabled: true,
+            ..Default::default()
         };
         adapter.apply_bindings(&[binding]).unwrap();
 
-        // 初始状态应为 Unknown
-        assert_eq!(adapter.snapshot("A-01").unwrap().status, ChargerStatus::Unknown);
+        // 初始状态应为 Idle
+        assert_eq!(
+            adapter.snapshot("A-01").unwrap().status,
+            ChargerStatus::Idle
+        );
 
         // 收到开始充电更新
         adapter
@@ -175,10 +252,16 @@ mod tests {
                 started_at: Some(Utc::now()),
                 completed_at: None,
                 provider: Some("cloud-fast-charge".into()),
+                raw_timestamp: None,
+                staleness_status: Some(StalenessStatus::Fresh),
+                is_simulated: false,
             })
             .unwrap();
 
-        assert_eq!(adapter.snapshot("A-01").unwrap().status, ChargerStatus::Charging);
+        assert_eq!(
+            adapter.snapshot("A-01").unwrap().status,
+            ChargerStatus::Charging
+        );
 
         // 人工将最后心跳篡改到 15 秒前，测试离线自动软降级
         {
@@ -188,6 +271,23 @@ mod tests {
 
         let degraded = adapter.tick_offline_detection().unwrap();
         assert_eq!(degraded, vec!["A-01"]);
-        assert_eq!(adapter.snapshot("A-01").unwrap().status, ChargerStatus::Offline);
+        assert_eq!(
+            adapter.snapshot("A-01").unwrap().status,
+            ChargerStatus::Offline
+        );
+
+        let replacement = DeviceBinding {
+            site_id: "site-1".into(),
+            space_id: "B-01".into(),
+            camera_id: "cam-02".into(),
+            charger_id: "chg-02".into(),
+            relay_channel: 1,
+            speaker_channel: None,
+            enabled: true,
+            ..Default::default()
+        };
+        adapter.apply_bindings(&[replacement]).unwrap();
+        assert!(adapter.snapshot("A-01").is_err());
+        assert_eq!(adapter.snapshot("B-01").unwrap().charger_id, "chg-02");
     }
 }

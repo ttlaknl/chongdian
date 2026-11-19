@@ -1,0 +1,1152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能车位管控边缘终端 - 本地运维控制台</title>
+    <link rel="stylesheet" href="/vendor/app.css">
+    <script src="/vendor/vue.global.prod.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+            background-color: #f3f4f6;
+        }
+        [v-cloak] { display: none; }
+        .plate-badge-blue {
+            background: linear-gradient(135deg, #1d4ed8, #1e40af);
+            color: #ffffff;
+            border: 1px solid #93c5fd;
+            font-family: monospace;
+            letter-spacing: 0.05em;
+        }
+        .plate-badge-green {
+            background: linear-gradient(135deg, #dcfce7, #86efac);
+            color: #064e3b;
+            border: 1px solid #10b981;
+            font-family: monospace;
+            letter-spacing: 0.05em;
+        }
+        .plate-badge-yellow {
+            background: linear-gradient(135deg, #fef08a, #facc15);
+            color: #422006;
+            border: 1px solid #eab308;
+            font-family: monospace;
+            letter-spacing: 0.05em;
+        }
+    </style>
+</head>
+<body class="text-slate-800 antialiased">
+<div id="app" v-cloak class="min-h-screen flex flex-col">
+
+    <!-- 顶部状态导航栏 -->
+    <header class="bg-slate-900 text-white shadow-md sticky top-0 z-40">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex flex-wrap justify-between items-center py-3 gap-3">
+                <div class="flex items-center space-x-3">
+                    <div class="w-9 h-9 rounded-lg bg-blue-600 flex items-center justify-center font-bold text-lg shadow">
+                        E
+                    </div>
+                    <div>
+                        <h1 class="text-base font-bold tracking-wide flex flex-wrap items-center gap-2">
+                            <span>边缘计算视觉管控终端</span>
+                            <span class="px-2 py-0.5 text-xs bg-slate-800 text-blue-300 rounded font-mono border border-slate-700">
+                                {{ health.nodeId || systemConfig.nodeId || '未命名节点' }}
+                            </span>
+                            <span class="px-2 py-0.5 text-[11px] bg-slate-800 text-slate-300 rounded font-mono border border-slate-700">
+                                vision: {{ health.visionMode || '--' }}
+                            </span>
+                        </h1>
+                        <p class="text-xs text-slate-400">
+                            AI引擎: <span class="font-mono text-slate-300">{{ health.aiEngine || '--' }}</span>
+                            <span class="mx-2">|</span>
+                            配置版本: <span class="font-mono text-slate-300">v{{ health.configurationVersion ?? 0 }}</span>
+                            <span class="mx-2">|</span>
+                            硬件模式: <span class="font-mono text-slate-300">{{ health.hardwareStatus || '--' }}</span>
+                        </p>
+                    </div>
+                </div>
+
+                <div class="flex flex-wrap items-center gap-2">
+                    <div class="flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium" :class="cloudStatusClass">
+                        <span class="w-2 h-2 rounded-full" :class="cloudDotClass"></span>
+                        <span>{{ cloudStatusText }}</span>
+                    </div>
+
+                    <button @click="openKeyModal"
+                            class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 rounded-lg border border-slate-700 transition">
+                        {{ apiKey ? '🔑 已配管理密钥' : '🔓 设置本地密钥' }}
+                    </button>
+
+                    <button @click="refreshAll" :disabled="loading"
+                            class="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg font-medium transition flex items-center space-x-1">
+                        <span :class="{'animate-spin': loading}">↻</span>
+                        <span>刷新全量数据</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 导航 Tab -->
+            <nav class="flex space-x-1 overflow-x-auto pb-1">
+                <button v-for="tab in tabs" :key="tab.id"
+                        @click="currentTab = tab.id"
+                        :class="currentTab === tab.id ? 'bg-slate-800 text-white border-b-2 border-blue-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'"
+                        class="px-4 py-2 text-sm font-medium rounded-t-lg transition-colors whitespace-nowrap">
+                    {{ tab.icon }} {{ tab.label }}
+                </button>
+            </nav>
+        </div>
+    </header>
+
+    <!-- 认证提示弹窗 (仅在后端返回 401/403 或手动点击设置密钥时打开) -->
+    <div v-if="showKeyModal" class="fixed inset-0 z-50 bg-slate-900/75 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 space-y-4">
+            <div class="flex justify-between items-center">
+                <h3 class="text-lg font-bold text-slate-900">边缘节点本地管理鉴权</h3>
+                <button v-if="!authRequired" @click="showKeyModal = false" class="text-slate-400 hover:text-slate-700">✕</button>
+            </div>
+            <p class="text-xs text-slate-600 leading-relaxed">
+                当前边缘节点启用了本地管理密钥保护 (<span class="font-mono">EDGE_LOCAL_API_KEY</span>)。
+                请输入您部署时在 <span class="font-mono">.env</span> 中配置的密钥，将仅保存在当前浏览器标签页的 <span class="font-mono">sessionStorage</span> 中。
+            </p>
+            <div>
+                <label class="block text-xs font-semibold text-slate-700 mb-1">X-Edge-Local-Key</label>
+                <input type="password" v-model="apiKeyDraft" @keyup.enter="applyApiKey"
+                       placeholder="请输入边缘节点本地管理密钥"
+                       class="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono focus:ring-2 focus:ring-blue-500 outline-none">
+            </div>
+            <div v-if="authError" class="text-xs text-red-600 font-medium bg-red-50 px-3 py-2 rounded border border-red-200">
+                {{ authError }}
+            </div>
+            <div class="flex justify-end space-x-2 pt-2">
+                <button v-if="apiKey" @click="clearApiKey" class="px-3 py-2 text-xs text-slate-600 hover:text-slate-900 border border-slate-300 rounded-lg">
+                    清除密钥
+                </button>
+                <button @click="applyApiKey" class="px-4 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg">
+                    保存并连接
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <div v-if="errorMsg" class="mb-4 bg-red-50 border-l-4 border-red-500 p-3 rounded flex justify-between items-center text-red-700 text-xs">
+            <span>⚠️ {{ errorMsg }}</span>
+            <button @click="errorMsg = ''" class="text-red-500 hover:text-red-800 font-bold">✕</button>
+        </div>
+        <div v-if="successMsg" class="mb-4 bg-emerald-50 border-l-4 border-emerald-500 p-3 rounded flex justify-between items-center text-emerald-700 text-xs">
+            <span>✅ {{ successMsg }}</span>
+            <button @click="successMsg = ''" class="text-emerald-500 hover:text-emerald-800 font-bold">✕</button>
+        </div>
+
+        <!-- 1. 系统总览 -->
+        <section v-if="currentTab === 'overview'" class="space-y-6">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div class="bg-white rounded-xl shadow-sm p-5 border border-slate-200">
+                    <div class="text-xs font-semibold text-slate-500 uppercase">已配置管控车位</div>
+                    <div class="mt-2 flex items-baseline space-x-2">
+                        <span class="text-3xl font-extrabold text-slate-900">{{ health.configuredSpaces ?? spacesList.length }}</span>
+                        <span class="text-xs text-slate-500">上限 {{ health.maxVideoChannels ?? 16 }} 路</span>
+                    </div>
+                    <div class="mt-2 text-xs text-slate-600">
+                        占车位: <span class="font-bold text-blue-600">{{ countOccupied }}</span>
+                        <span class="mx-1">|</span>
+                        在网相机: <span class="font-bold text-emerald-600">{{ camerasOnlineCount }}/{{ cameras.length }}</span>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-sm p-5 border border-slate-200">
+                    <div class="text-xs font-semibold text-slate-500 uppercase">继电器声光告警</div>
+                    <div class="mt-2 flex items-baseline space-x-2">
+                        <span class="text-3xl font-extrabold" :class="countAlarming > 0 ? 'text-red-600' : 'text-emerald-600'">
+                            {{ countAlarming }}
+                        </span>
+                        <span class="text-xs text-slate-500">活跃告警车位</span>
+                    </div>
+                    <div class="mt-2 text-xs text-slate-500">
+                        正在充电桩: <span class="font-bold text-blue-600">{{ countCharging }}</span>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-sm p-5 border border-slate-200">
+                    <div class="text-xs font-semibold text-slate-500 uppercase">SQLite 离线积压 / 取证</div>
+                    <div class="mt-2 flex items-baseline space-x-2">
+                        <span class="text-3xl font-extrabold text-slate-900">{{ telemetry.sqliteUnuploadedCount ?? health.pendingEvents ?? 0 }}</span>
+                        <span class="text-xs text-slate-500">待上传事件</span>
+                    </div>
+                    <div class="mt-2 text-xs text-slate-500">
+                        累计帧数: <span class="font-mono font-bold text-slate-700">{{ telemetry.framesProcessedTotal ?? 0 }}</span>
+                        <span class="mx-1">|</span>
+                        违规: <span class="font-mono font-bold text-red-600">{{ telemetry.violationsDetectedTotal ?? 0 }}</span>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-sm p-5 border border-slate-200">
+                    <div class="text-xs font-semibold text-slate-500 uppercase">边缘工控机硬件遥测</div>
+                    <div class="mt-2 flex items-baseline space-x-2">
+                        <span class="text-3xl font-extrabold text-slate-900">{{ formatPct(telemetry.cpuUsage) }}</span>
+                        <span class="text-xs text-slate-500">CPU</span>
+                    </div>
+                    <div class="mt-2 text-xs text-slate-500">
+                        内存: <span class="font-mono font-bold">{{ formatPct(telemetry.memoryUsage) }}</span>
+                        <span class="mx-1">|</span>
+                        温度: <span class="font-mono font-bold">{{ telemetry.temperature > 0 ? telemetry.temperature.toFixed(1) + '°C' : '--' }}</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+                <h2 class="text-base font-bold text-slate-800 mb-4">终端系统信息与云边运行状态</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
+                    <div class="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-1.5">
+                        <div class="font-semibold text-slate-700">核心标识与运行时</div>
+                        <div class="flex justify-between"><span class="text-slate-500">节点编号:</span><span class="font-mono font-bold">{{ health.nodeId || '--' }}</span></div>
+                        <div class="flex justify-between"><span class="text-slate-500">固件版本:</span><span class="font-mono font-bold">v{{ health.version ?? 1 }}</span></div>
+                        <div class="flex justify-between"><span class="text-slate-500">运行持续:</span><span class="font-mono">{{ formatUptime(telemetry.uptimeSeconds) }}</span></div>
+                        <div class="flex justify-between"><span class="text-slate-500">看门狗状态:</span>
+                            <span :class="health.watchdogHealthy ? 'text-emerald-600 font-bold' : 'text-red-600 font-bold'">
+                                {{ health.watchdogHealthy ? '正常 (HEALTHY)' : '异常' }}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-1.5">
+                        <div class="font-semibold text-slate-700">云平台连接配置</div>
+                        <div class="flex justify-between"><span class="text-slate-500">云端地址:</span><span class="font-mono truncate max-w-[180px]" :title="systemConfig.cloudUrl">{{ systemConfig.cloudUrl || '未配置 (纯离线模式)' }}</span></div>
+                        <div class="flex justify-between"><span class="text-slate-500">连接状态:</span><span class="font-semibold">{{ cloudStatusText }}</span></div>
+                        <div class="flex justify-between"><span class="text-slate-500">局域网主 IP:</span><span class="font-mono font-bold text-blue-600">{{ networkStatus?.primaryIp || '--' }}</span></div>
+                        <div class="flex justify-between"><span class="text-slate-500">磁盘水位:</span><span class="font-mono">{{ telemetry.disk ? telemetry.disk.watermarkPercent.toFixed(1) + '%' : '--' }}</span></div>
+                    </div>
+                    <div class="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-1.5">
+                        <div class="font-semibold text-slate-700">当前生效规则参数</div>
+                        <div class="flex justify-between"><span class="text-slate-500">未充电容忍:</span><span class="font-mono">{{ rules.unchargedGraceSeconds ?? '--' }}s</span></div>
+                        <div class="flex justify-between"><span class="text-slate-500">充满超时宽限:</span><span class="font-mono">{{ rules.completedGraceSeconds ?? '--' }}s</span></div>
+                        <div class="flex justify-between"><span class="text-slate-500">进/离防抖:</span><span class="font-mono">{{ rules.vehicleEnterConfirmSeconds ?? '--' }}s / {{ rules.vehicleLeaveConfirmSeconds ?? '--' }}s</span></div>
+                        <div class="flex justify-between"><span class="text-slate-500">未知车牌策略:</span><span class="font-mono">{{ rules.unknownVehicleAction || '--' }}</span></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 2. 系统配置与局域网设置 -->
+        <section v-if="currentTab === 'system'" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-4">
+                <div class="border-b border-slate-100 pb-3">
+                    <h2 class="text-base font-bold text-slate-800">云平台连接与鉴权设置</h2>
+                    <p class="text-xs text-slate-500 mt-1">保存后立即写入 edge.db 并热更新云边后台同步任务</p>
+                </div>
+                <div class="space-y-3 text-xs">
+                    <div>
+                        <label class="block font-semibold text-slate-700 mb-1">云平台地址 (cloudUrl)</label>
+                        <input type="text" v-model="systemConfig.cloudUrl"
+                               placeholder="例如: http://192.168.1.50:8080 (留空仅离线)"
+                               class="w-full px-3 py-2 border rounded-lg font-mono focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                    <div>
+                        <label class="block font-semibold text-slate-700 mb-1">云边通信认证密钥 (EDGE_API_KEY)</label>
+                        <input type="password" v-model="systemConfig.edgeApiKey" autocomplete="new-password"
+                               placeholder="与云平台 EDGE_API_KEY 保持一致"
+                               class="w-full px-3 py-2 border rounded-lg font-mono focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                    <div>
+                        <label class="block font-semibold text-slate-700 mb-1">本地控制台密钥 (EDGE_LOCAL_API_KEY)</label>
+                        <input type="password" v-model="systemConfig.localApiKey" autocomplete="new-password"
+                               placeholder="保护 8081 管理接口 (留空则免密)"
+                               class="w-full px-3 py-2 border rounded-lg font-mono focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                    <div>
+                        <label class="block font-semibold text-slate-700 mb-1">边缘节点编号 (nodeId)</label>
+                        <input type="text" v-model="systemConfig.nodeId"
+                               placeholder="例如: edge-i3-01"
+                               class="w-full px-3 py-2 border rounded-lg font-mono focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                    <button @click="saveSystemConfig" :disabled="savingConfig"
+                            class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 px-4 rounded-lg transition">
+                        {{ savingConfig ? '正在保存...' : '保存云边配置' }}
+                    </button>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-4">
+                <div class="border-b border-slate-100 pb-3 flex justify-between items-center">
+                    <div>
+                        <h2 class="text-base font-bold text-slate-800">本机网络接口与局域网配置</h2>
+                        <p class="text-xs text-slate-500 mt-1">实时采集宿主机/容器网卡信息（非写死地址）</p>
+                    </div>
+                    <button v-if="networkStatus?.primaryIp" @click="copyText(networkStatus.primaryIp, '已复制主 IP: ' + networkStatus.primaryIp)"
+                            class="text-xs bg-slate-100 hover:bg-slate-200 px-2.5 py-1 rounded border border-slate-200 font-mono">
+                        📋 {{ networkStatus.primaryIp }}
+                    </button>
+                </div>
+                <div class="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-1.5">
+                    <div class="text-xs font-semibold text-slate-700">物理/虚拟网卡列表</div>
+                    <div v-if="!networkStatus?.interfaces?.length" class="text-xs text-slate-400">暂无可用网卡数据</div>
+                    <div v-for="nic in networkStatus?.interfaces" :key="nic.name"
+                         class="flex justify-between items-center text-xs bg-white px-3 py-2 rounded border border-slate-200">
+                        <div>
+                            <span class="font-bold text-slate-800">{{ nic.name }}</span>
+                            <span v-if="nic.mac" class="text-slate-400 font-mono ml-2">{{ nic.mac }}</span>
+                            <span v-if="nic.speed" class="text-slate-400 ml-2">({{ nic.speed }})</span>
+                        </div>
+                        <div class="flex items-center space-x-2">
+                            <span class="font-mono font-bold text-blue-600">{{ nic.ip || '--' }}</span>
+                            <span class="px-1.5 py-0.5 rounded text-[11px]"
+                                  :class="(nic.status || '').toUpperCase() === 'UP' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'">
+                                {{ nic.status }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                        <label class="block font-semibold text-slate-700 mb-1">申报 LAN IP</label>
+                        <input type="text" v-model="systemConfig.lanIp" placeholder="留空自动识别"
+                               class="w-full px-3 py-2 border rounded-lg font-mono">
+                    </div>
+                    <div>
+                        <label class="block font-semibold text-slate-700 mb-1">子网掩码</label>
+                        <input type="text" v-model="systemConfig.lanSubnet" placeholder="255.255.255.0"
+                               class="w-full px-3 py-2 border rounded-lg font-mono">
+                    </div>
+                    <div>
+                        <label class="block font-semibold text-slate-700 mb-1">默认网关</label>
+                        <input type="text" v-model="systemConfig.lanGateway" placeholder="网关地址"
+                               class="w-full px-3 py-2 border rounded-lg font-mono">
+                    </div>
+                    <div>
+                        <label class="block font-semibold text-slate-700 mb-1">DNS</label>
+                        <input type="text" v-model="systemConfig.lanDns" placeholder="DNS 地址"
+                               class="w-full px-3 py-2 border rounded-lg font-mono">
+                    </div>
+                </div>
+                <button @click="saveSystemConfig" :disabled="savingConfig"
+                        class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-medium py-2.5 px-4 rounded-lg text-xs transition">
+                    保存网络参数
+                </button>
+            </div>
+        </section>
+
+        <!-- 3. 车牌识别与在位状态 -->
+        <section v-if="currentTab === 'spaces'" class="space-y-6">
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                    <div>
+                        <h2 class="text-base font-bold text-slate-800">实时车位在位状态机与车牌识别</h2>
+                        <p class="text-xs text-slate-500 mt-0.5">来自真实 RTSP 视觉边车或设备管道的实时识别结果，绝无占位伪造数据</p>
+                    </div>
+                    <span class="text-xs text-slate-500">共 <strong class="text-blue-600">{{ spacesList.length }}</strong> 个绑定车位</span>
+                </div>
+                <div v-if="spacesList.length === 0" class="p-8 text-center text-xs text-slate-500">
+                    当前暂无已下发的车位绑定，请在云端后台为节点 <span class="font-mono font-bold">{{ health.nodeId }}</span> 配置车位绑定并发布。
+                </div>
+                <div v-else class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-slate-200 text-xs">
+                        <thead class="bg-slate-50 text-slate-600">
+                        <tr>
+                            <th class="px-5 py-3 text-left font-semibold">车位</th>
+                            <th class="px-5 py-3 text-left font-semibold">车牌</th>
+                            <th class="px-5 py-3 text-left font-semibold">车辆类型 / 置信度</th>
+                            <th class="px-5 py-3 text-left font-semibold">防抖阶段</th>
+                            <th class="px-5 py-3 text-left font-semibold">电桩状态</th>
+                            <th class="px-5 py-3 text-left font-semibold">数据来源</th>
+                            <th class="px-5 py-3 text-left font-semibold">告警</th>
+                            <th class="px-5 py-3 text-right font-semibold">操作</th>
+                        </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100 bg-white">
+                        <tr v-for="space in spacesList" :key="space.spaceId" class="hover:bg-slate-50">
+                            <td class="px-5 py-3.5 font-mono font-bold text-slate-900">{{ space.spaceId }}</td>
+                            <td class="px-5 py-3.5">
+                                <span v-if="space.plate" class="inline-block px-2.5 py-0.5 rounded font-bold" :class="plateBadgeClass(space.plate, space.vehicleType)">
+                                    {{ space.plate }}
+                                </span>
+                                <span v-else class="text-slate-400 font-mono">-- 空闲/未检出 --</span>
+                            </td>
+                            <td class="px-5 py-3.5">
+                                <span class="font-medium">{{ vehicleTypeLabel(space.vehicleType) }}</span>
+                                <span v-if="space.confidence" class="ml-1.5 text-slate-400 font-mono">({{ (space.confidence * 100).toFixed(0) }}%)</span>
+                            </td>
+                            <td class="px-5 py-3.5">
+                                <span class="px-2 py-0.5 rounded-full font-medium" :class="phaseBadgeClass(space.phase)">
+                                    {{ phaseLabel(space.phase) }}
+                                </span>
+                            </td>
+                            <td class="px-5 py-3.5">
+                                <span class="px-2 py-0.5 rounded font-medium" :class="chargerStatusBadge(space.chargerStatus)">
+                                    {{ chargerStatusLabel(space.chargerStatus) }}
+                                </span>
+                            </td>
+                            <td class="px-5 py-3.5 font-mono text-slate-500">
+                                {{ space.streamType || '--' }}
+                                <span v-if="space.isSimulated" class="ml-1 px-1 py-0.5 bg-amber-100 text-amber-800 rounded text-[10px]">SIM</span>
+                            </td>
+                            <td class="px-5 py-3.5">
+                                <span v-if="space.alarming" class="bg-red-100 text-red-700 font-bold px-2 py-0.5 rounded">🔔 告警输出中</span>
+                                <span v-else class="text-slate-400">正常</span>
+                            </td>
+                            <td class="px-5 py-3.5 text-right space-x-2">
+                                <button @click="silenceSpace(space.spaceId)" class="text-blue-600 hover:text-blue-800 px-2 py-1 border border-blue-200 rounded bg-blue-50/50">消音</button>
+                                <button @click="viewSpaceSnapshot(space)" class="text-slate-700 hover:text-slate-900 px-2 py-1 border border-slate-200 rounded">实时画面</button>
+                            </td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- 4. RTSP 视频监控与摄像头注册管理 -->
+        <section v-if="currentTab === 'cameras'" class="space-y-6">
+            <!-- RTSP 摄像头注册表单与列表 -->
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-5">
+                <div class="flex flex-wrap justify-between items-center gap-3 border-b border-slate-100 pb-3">
+                    <div>
+                        <h2 class="text-base font-bold text-slate-800">RTSP / 视频通路通道管理 ({{ cameras.length }})</h2>
+                        <p class="text-xs text-slate-500 mt-0.5">支持云端配置自动下发与本地紧急注册，注册后将在 10 秒内自动同步至 vision-service 拉流</p>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-6 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200 text-xs items-end">
+                    <div>
+                        <label class="block font-semibold text-slate-700 mb-1">摄像头 ID</label>
+                        <input type="text" v-model="cameraForm.cameraId" placeholder="cam-A-01" class="w-full px-2.5 py-2 border rounded-lg font-mono bg-white">
+                    </div>
+                    <div>
+                        <label class="block font-semibold text-slate-700 mb-1">绑定车位</label>
+                        <input type="text" v-model="cameraForm.spaceId" placeholder="A-01" class="w-full px-2.5 py-2 border rounded-lg font-mono bg-white">
+                    </div>
+                    <div>
+                        <label class="block font-semibold text-slate-700 mb-1">协议</label>
+                        <select v-model="cameraForm.protocol" class="w-full px-2.5 py-2 border rounded-lg bg-white">
+                            <option value="RTSP">RTSP</option>
+                            <option value="GB28181">GB28181</option>
+                        </select>
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block font-semibold text-slate-700 mb-1">RTSP 视频流地址</label>
+                        <input type="text" v-model="cameraForm.streamUrl" placeholder="rtsp://user:pass@192.168.x.x:554/stream"
+                               class="w-full px-2.5 py-2 border rounded-lg font-mono bg-white">
+                    </div>
+                    <div>
+                        <button @click="submitRegisterCamera" :disabled="savingCamera"
+                                class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-3 rounded-lg transition">
+                            {{ savingCamera ? '提交中...' : '➕ 注册/更新通道' }}
+                        </button>
+                    </div>
+                    <div class="md:col-span-6">
+                        <label class="block font-semibold text-slate-700 mb-1">ROI 识别区域 JSON（可选，归一化坐标 0~1）</label>
+                        <input type="text" v-model="cameraForm.roiJson" placeholder='可选，例如: {"x":0.1,"y":0.15,"w":0.8,"h":0.75}'
+                               class="w-full px-2.5 py-2 border rounded-lg font-mono bg-white">
+                    </div>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-slate-200 text-xs">
+                        <thead class="bg-slate-50 text-slate-600">
+                        <tr>
+                            <th class="px-4 py-2.5 text-left font-semibold">摄像头 ID</th>
+                            <th class="px-4 py-2.5 text-left font-semibold">绑定车位</th>
+                            <th class="px-4 py-2.5 text-left font-semibold">协议</th>
+                            <th class="px-4 py-2.5 text-left font-semibold">流地址</th>
+                            <th class="px-4 py-2.5 text-left font-semibold">ROI</th>
+                            <th class="px-4 py-2.5 text-left font-semibold">状态</th>
+                            <th class="px-4 py-2.5 text-left font-semibold">最近心跳</th>
+                            <th class="px-4 py-2.5 text-right font-semibold">操作</th>
+                        </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100 bg-white">
+                        <tr v-if="cameras.length === 0">
+                            <td colspan="8" class="px-4 py-6 text-center text-slate-400">暂无已注册摄像头通道</td>
+                        </tr>
+                        <tr v-for="cam in cameras" :key="cam.cameraId">
+                            <td class="px-4 py-2.5 font-mono font-bold text-slate-800">{{ cam.cameraId }}</td>
+                            <td class="px-4 py-2.5 font-mono text-blue-600 font-bold">{{ cam.spaceId }}</td>
+                            <td class="px-4 py-2.5 font-mono">{{ cam.protocol || 'RTSP' }}</td>
+                            <td class="px-4 py-2.5 font-mono text-slate-600 truncate max-w-[240px]" :title="cam.streamUrl">
+                                {{ cam.streamUrl || '-- 未填写流地址 --' }}
+                            </td>
+                            <td class="px-4 py-2.5 font-mono text-slate-500 truncate max-w-[160px]" :title="cam.roiJson">{{ cam.roiJson || '全画面' }}</td>
+                            <td class="px-4 py-2.5">
+                                <span class="px-2 py-0.5 rounded-full font-semibold" :class="cameraStateBadge(cam.state)">
+                                    {{ cam.state }}
+                                </span>
+                            </td>
+                            <td class="px-4 py-2.5 text-slate-500">{{ formatTimestamp(cam.lastHeartbeat) }}</td>
+                            <td class="px-4 py-2.5 text-right">
+                                <button @click="removeCamera(cam.cameraId)" class="text-red-600 hover:text-red-800 px-2 py-1 border border-red-200 rounded">
+                                    删除
+                                </button>
+                            </td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 真实摄像头 JPEG 实时抓拍网格 -->
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-5">
+                <div class="flex flex-wrap justify-between items-center gap-3 border-b border-slate-100 pb-3">
+                    <div>
+                        <h2 class="text-base font-bold text-slate-800">实时视频实景抓拍预览</h2>
+                        <p class="text-xs text-slate-500 mt-0.5">直接显示摄像头推送至边缘端的真实 JPEG 帧（无帧时返回 404 并显示占位等待提示）</p>
+                    </div>
+                    <div class="flex items-center gap-2 text-xs">
+                        <button @click="toggleLiveStream"
+                                :class="liveStreamActive ? 'bg-red-50 text-red-600 border-red-200' : 'bg-emerald-50 text-emerald-600 border-emerald-200'"
+                                class="px-3 py-1.5 border rounded-lg font-bold transition">
+                            {{ liveStreamActive ? '暂停自动刷新' : '恢复自动刷新' }}
+                        </button>
+                        <div class="flex items-center space-x-1 bg-slate-100 p-1 rounded-lg">
+                            <button v-for="rate in [2, 3, 5]" :key="rate" @click="setStreamInterval(rate)"
+                                    :class="streamIntervalSeconds === rate ? 'bg-white shadow-sm font-bold text-blue-600' : 'text-slate-600'"
+                                    class="px-2 py-0.5 rounded">
+                                {{ rate }}s
+                            </button>
+                        </div>
+                        <button @click="refreshSnapshotsNow" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg font-medium">
+                            ⚡ 立即刷新
+                        </button>
+                    </div>
+                </div>
+
+                <div v-if="previewTargets.length === 0" class="p-8 text-center text-xs text-slate-400">
+                    暂无可预览车位或摄像头通道
+                </div>
+                <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                    <div v-for="item in previewTargets" :key="item.spaceId"
+                         class="bg-slate-900 rounded-xl overflow-hidden shadow border border-slate-800 flex flex-col">
+                        <div class="relative bg-slate-950 aspect-video flex items-center justify-center overflow-hidden border-b border-slate-800 cursor-pointer"
+                             @click="openLiveModal(item)">
+                            <img v-show="!snapErrors[item.spaceId]"
+                                 :src="'/api/v1/spaces/' + encodeURIComponent(item.spaceId) + '/snapshot?t=' + snapshotTimestamp"
+                                 :alt="'抓拍 ' + item.spaceId"
+                                 @load="onSnapLoad(item.spaceId)"
+                                 @error="onSnapError(item.spaceId)"
+                                 class="w-full h-full object-cover">
+                            <div v-if="snapErrors[item.spaceId]" class="text-center px-4 text-slate-400 space-y-1">
+                                <div class="text-2xl">📷</div>
+                                <div class="text-xs font-medium">等待 RTSP 摄像头推流 / 暂无抓拍帧</div>
+                                <div class="text-[11px] font-mono text-slate-500">{{ item.spaceId }}</div>
+                            </div>
+                            <div class="absolute top-2 left-2 bg-black/75 px-2 py-0.5 rounded text-white text-xs font-mono">
+                                {{ item.spaceId }}
+                            </div>
+                            <div v-if="item.plate" class="absolute bottom-2 left-2 px-2 py-0.5 rounded text-xs font-bold"
+                                 :class="plateBadgeClass(item.plate, item.vehicleType)">
+                                {{ item.plate }}
+                            </div>
+                        </div>
+                        <div class="p-3 bg-slate-900 text-xs text-slate-300 space-y-1">
+                            <div class="flex justify-between">
+                                <span class="text-slate-400">相机通道:</span>
+                                <span class="font-mono">{{ getCameraForSpace(item.spaceId)?.cameraId || '--' }}</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-slate-400">相机状态:</span>
+                                <span class="font-mono">{{ getCameraForSpace(item.spaceId)?.state || '--' }}</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-slate-400">识别来源:</span>
+                                <span class="font-mono text-emerald-400">{{ item.streamType || health.aiEngine || '--' }}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 放大预览弹窗 -->
+            <div v-if="activePreviewSpace" class="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+                <div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl max-w-4xl w-full flex flex-col">
+                    <div class="px-5 py-3 bg-slate-950 border-b border-slate-800 flex justify-between items-center text-white text-sm">
+                        <span class="font-bold">车位 {{ activePreviewSpace.spaceId }} 实景抓拍</span>
+                        <button @click="activePreviewSpace = null" class="text-slate-400 hover:text-white px-2">✕</button>
+                    </div>
+                    <div class="relative bg-black aspect-video flex items-center justify-center">
+                        <img v-if="!snapErrors[activePreviewSpace.spaceId]"
+                             :src="'/api/v1/spaces/' + encodeURIComponent(activePreviewSpace.spaceId) + '/snapshot?t=' + snapshotTimestamp"
+                             @error="snapErrors[activePreviewSpace.spaceId] = true"
+                             @load="snapErrors[activePreviewSpace.spaceId] = false"
+                             class="w-full h-full object-contain">
+                        <div v-else class="text-center px-4 text-slate-400 space-y-2">
+                            <div class="text-3xl text-rose-500 font-bold">⚠️</div>
+                            <div class="text-sm font-semibold text-rose-400">摄像头已离线 (视频流中断)</div>
+                            <div class="text-xs text-slate-500">未收到最新视频流帧，已终止展示陈旧静态画面</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 5. 充电桩状态 -->
+        <section v-if="currentTab === 'chargers'" class="space-y-6">
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                <div class="px-6 py-4 border-b border-slate-100 flex justify-between items-center">
+                    <div>
+                        <h2 class="text-base font-bold text-slate-800">充电桩状态快照与车-桩协同研判</h2>
+                        <p class="text-xs text-slate-500 mt-0.5">来自真实电桩适配协议 / OCPP / 云端回传</p>
+                    </div>
+                    <span class="text-xs text-slate-500">已配置 <strong class="text-emerald-600">{{ chargersList.length }}</strong> 台电桩</span>
+                </div>
+                <div v-if="chargersList.length === 0" class="p-8 text-center text-xs text-slate-400">暂无充电桩通道绑定</div>
+                <div v-else class="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div v-for="charger in chargersList" :key="charger.chargerId"
+                         class="border rounded-xl p-4 bg-slate-50/70 border-slate-200 space-y-3 text-xs">
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <div class="text-slate-400">设备标识</div>
+                                <div class="font-mono font-bold text-slate-900 text-sm">{{ charger.chargerId }}</div>
+                            </div>
+                            <span class="px-2.5 py-0.5 rounded-full font-bold" :class="chargerStatusBadge(charger.status)">
+                                {{ chargerStatusLabel(charger.status) }}
+                            </span>
+                        </div>
+                        <div class="bg-white p-2.5 rounded border border-slate-200 space-y-1 font-mono">
+                            <div class="flex justify-between"><span class="text-slate-400 font-sans">绑定车位:</span><span class="font-bold text-blue-600">{{ charger.spaceId }}</span></div>
+                            <div class="flex justify-between"><span class="text-slate-400 font-sans">数据来源:</span><span>{{ charger.provider || '--' }}</span></div>
+                            <div class="flex justify-between"><span class="text-slate-400 font-sans">订单号:</span><span>{{ charger.sessionId || '--' }}</span></div>
+                            <div class="flex justify-between"><span class="text-slate-400 font-sans">观测时间:</span><span>{{ formatTimestamp(charger.observedAt) }}</span></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 6. 继电器硬件控制通道 -->
+        <section v-if="currentTab === 'relays'" class="space-y-6">
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200 p-6 space-y-4">
+                <div class="border-b border-slate-100 pb-3">
+                    <h2 class="text-base font-bold text-slate-800">继电器报警输出通道详情</h2>
+                    <p class="text-xs text-slate-500 mt-0.5">字段严格对齐后端 RelayChannelStatus（通道号 / 物理输出状态 / 请求状态 / 自动消音 / 触发时间）</p>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full text-xs divide-y divide-slate-200">
+                        <thead class="bg-slate-50 text-slate-600">
+                        <tr>
+                            <th class="px-4 py-3 text-left font-semibold">车位</th>
+                            <th class="px-4 py-3 text-left font-semibold">物理通道</th>
+                            <th class="px-4 py-3 text-left font-semibold">触点输出 (outputActive)</th>
+                            <th class="px-4 py-3 text-left font-semibold">业务请求 (alarmRequested)</th>
+                            <th class="px-4 py-3 text-left font-semibold">自动静音 (autoMuted)</th>
+                            <th class="px-4 py-3 text-left font-semibold">最近触发</th>
+                            <th class="px-4 py-3 text-right font-semibold">操作</th>
+                        </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                        <tr v-if="relaysList.length === 0">
+                            <td colspan="7" class="px-4 py-6 text-center text-slate-400">暂无继电器通道映射</td>
+                        </tr>
+                        <tr v-for="ch in relaysList" :key="ch.spaceId">
+                            <td class="px-4 py-3 font-mono font-bold text-slate-800">{{ ch.spaceId }}</td>
+                            <td class="px-4 py-3 font-mono">DO-{{ ch.channel }}</td>
+                            <td class="px-4 py-3">
+                                <span class="px-2 py-0.5 rounded font-bold" :class="ch.outputActive ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'">
+                                    {{ ch.outputActive ? '闭合输出 (ON)' : '断开静默 (OFF)' }}
+                                </span>
+                            </td>
+                            <td class="px-4 py-3 font-mono">{{ ch.alarmRequested ? 'YES' : 'NO' }}</td>
+                            <td class="px-4 py-3 font-mono">{{ ch.autoMuted ? 'MUTED' : 'ACTIVE' }}</td>
+                            <td class="px-4 py-3 text-slate-500">{{ formatTimestamp(ch.lastTriggeredAt) }}</td>
+                            <td class="px-4 py-3 text-right">
+                                <button @click="silenceSpace(ch.spaceId)" class="text-blue-600 hover:text-blue-800 px-2 py-1 border border-blue-200 rounded">
+                                    本地消音
+                                </button>
+                            </td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+    </main>
+</div>
+
+<script>
+const { createApp, ref, computed, onMounted, onUnmounted } = Vue;
+
+createApp({
+    setup() {
+        const SESSION_KEY = 'edge_local_api_key';
+        const apiKey = ref(sessionStorage.getItem(SESSION_KEY) || '');
+        const apiKeyDraft = ref(apiKey.value);
+        const showKeyModal = ref(false);
+        const authRequired = ref(false);
+        const authError = ref('');
+
+        const currentTab = ref('overview');
+        const tabs = [
+            { id: 'overview', label: '系统总览', icon: '📊' },
+            { id: 'system', label: '云边与网络', icon: '🌐' },
+            { id: 'spaces', label: '车位与识别', icon: '🚘' },
+            { id: 'cameras', label: '视频与通道', icon: '📹' },
+            { id: 'chargers', label: '充电桩状态', icon: '⚡' },
+            { id: 'relays', label: '继电器通道', icon: '🎛️' }
+        ];
+
+        const loading = ref(false);
+        const savingConfig = ref(false);
+        const savingCamera = ref(false);
+        const errorMsg = ref('');
+        const successMsg = ref('');
+
+        const health = ref({});
+        const telemetry = ref({});
+        const spaces = ref({});
+        const cameras = ref([]);
+        const chargers = ref([]);
+        const relaysDetails = ref({});
+        const rules = ref({});
+        const networkStatus = ref(null);
+        const systemConfig = ref({
+            nodeId: '',
+            cloudUrl: '',
+            edgeApiKey: '',
+            localApiKey: '',
+            lanIp: '',
+            lanSubnet: '',
+            lanGateway: '',
+            lanDns: ''
+        });
+
+        const cameraForm = ref({
+            cameraId: '',
+            spaceId: '',
+            protocol: 'RTSP',
+            streamUrl: '',
+            roiJson: ''
+        });
+
+        const snapshotTimestamp = ref(Date.now());
+        const liveStreamActive = ref(true);
+        const streamIntervalSeconds = ref(3);
+        const activePreviewSpace = ref(null);
+        const snapErrors = ref({});
+
+        let pollTimer = null;
+        let streamTimer = null;
+
+        const apiFetch = async (url, options = {}) => {
+            const headers = { ...(options.headers || {}) };
+            if (options.body && !headers['Content-Type']) {
+                headers['Content-Type'] = 'application/json';
+            }
+            if (apiKey.value) {
+                headers['X-Edge-Local-Key'] = apiKey.value;
+            }
+            const res = await fetch(url, { ...options, headers });
+            if (res.status === 401 || res.status === 403) {
+                authRequired.value = true;
+                authError.value = '本地管理接口需要正确的 X-Edge-Local-Key 密钥';
+                showKeyModal.value = true;
+                throw new Error('HTTP ' + res.status);
+            }
+            if (!res.ok) {
+                const txt = await res.text();
+                throw new Error(txt || ('HTTP ' + res.status));
+            }
+            return res.json();
+        };
+
+        const openKeyModal = () => {
+            apiKeyDraft.value = apiKey.value;
+            authError.value = '';
+            showKeyModal.value = true;
+        };
+
+        const applyApiKey = async () => {
+            apiKey.value = (apiKeyDraft.value || '').trim();
+            if (apiKey.value) {
+                sessionStorage.setItem(SESSION_KEY, apiKey.value);
+            } else {
+                sessionStorage.removeItem(SESSION_KEY);
+            }
+            authError.value = '';
+            authRequired.value = false;
+            showKeyModal.value = false;
+            await refreshAll();
+        };
+
+        const clearApiKey = () => {
+            apiKeyDraft.value = '';
+            apiKey.value = '';
+            sessionStorage.removeItem(SESSION_KEY);
+            showKeyModal.value = false;
+        };
+
+        const fetchHealth = async () => {
+            const res = await fetch('/health');
+            if (res.ok) health.value = await res.json();
+        };
+
+        const fetchTelemetry = async () => {
+            try { telemetry.value = await apiFetch('/api/v1/telemetry'); } catch (_) {}
+        };
+
+        const fetchSpaces = async () => {
+            const list = await apiFetch('/api/v1/spaces/status');
+            const next = {};
+            for (const item of list) {
+                next[item.spaceId] = item;
+            }
+            spaces.value = next;
+        };
+
+        const fetchCameras = async () => {
+            cameras.value = await apiFetch('/api/v1/cameras');
+        };
+
+        const fetchChargers = async () => {
+            chargers.value = await apiFetch('/api/v1/chargers');
+        };
+
+        const fetchRelays = async () => {
+            relaysDetails.value = await apiFetch('/api/v1/relays/details');
+        };
+
+        const fetchRules = async () => {
+            try { rules.value = await apiFetch('/api/v1/rules'); } catch (_) {}
+        };
+
+        const fetchSystemConfig = async () => {
+            const cfg = await apiFetch('/api/v1/system/config');
+            systemConfig.value = {
+                nodeId: cfg.nodeId || '',
+                cloudUrl: cfg.cloudUrl || '',
+                edgeApiKey: cfg.edgeApiKey || '',
+                localApiKey: cfg.localApiKey || '',
+                lanIp: cfg.lanIp || '',
+                lanSubnet: cfg.lanSubnet || '',
+                lanGateway: cfg.lanGateway || '',
+                lanDns: cfg.lanDns || ''
+            };
+        };
+
+        const fetchNetwork = async () => {
+            try { networkStatus.value = await apiFetch('/api/v1/system/network'); } catch (_) {}
+        };
+
+        const refreshAll = async () => {
+            loading.value = true;
+            try {
+                await fetchHealth();
+                await Promise.all([
+                    fetchSpaces(),
+                    fetchCameras(),
+                    fetchChargers(),
+                    fetchRelays(),
+                    fetchTelemetry(),
+                    fetchRules(),
+                    fetchSystemConfig(),
+                    fetchNetwork()
+                ]);
+            } catch (e) {
+                if (!showKeyModal.value) {
+                    errorMsg.value = '加载数据失败: ' + e.message;
+                }
+            } finally {
+                loading.value = false;
+            }
+        };
+
+        const saveSystemConfig = async () => {
+            savingConfig.value = true;
+            errorMsg.value = '';
+            successMsg.value = '';
+            try {
+                const payload = {
+                    nodeId: (systemConfig.value.nodeId || '').trim() || (health.value.nodeId || 'edge-local-01'),
+                    cloudUrl: (systemConfig.value.cloudUrl || '').trim() || null,
+                    edgeApiKey: (systemConfig.value.edgeApiKey || '').trim() || null,
+                    localApiKey: (systemConfig.value.localApiKey || '').trim() || null,
+                    lanIp: (systemConfig.value.lanIp || '').trim() || null,
+                    lanSubnet: (systemConfig.value.lanSubnet || '').trim() || null,
+                    lanGateway: (systemConfig.value.lanGateway || '').trim() || null,
+                    lanDns: (systemConfig.value.lanDns || '').trim() || null
+                };
+                await apiFetch('/api/v1/system/config', {
+                    method: 'POST',
+                    body: JSON.stringify(payload)
+                });
+                if (payload.localApiKey) {
+                    apiKey.value = payload.localApiKey;
+                    sessionStorage.setItem(SESSION_KEY, payload.localApiKey);
+                } else {
+                    apiKey.value = '';
+                    sessionStorage.removeItem(SESSION_KEY);
+                }
+                successMsg.value = '系统配置已持久化并生效';
+                await refreshAll();
+            } catch (e) {
+                errorMsg.value = '保存配置失败: ' + e.message;
+            } finally {
+                savingConfig.value = false;
+            }
+        };
+
+        const submitRegisterCamera = async () => {
+            const cid = (cameraForm.value.cameraId || '').trim();
+            const sid = (cameraForm.value.spaceId || '').trim();
+            const url = (cameraForm.value.streamUrl || '').trim();
+            if (!cid || !sid || !url) {
+                errorMsg.value = '请填写摄像头 ID、绑定车位和 RTSP 流地址';
+                return;
+            }
+            savingCamera.value = true;
+            errorMsg.value = '';
+            successMsg.value = '';
+            try {
+                await apiFetch('/api/v1/cameras', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        cameraId: cid,
+                        spaceId: sid,
+                        protocol: cameraForm.value.protocol || 'RTSP',
+                        streamUrl: url,
+                        roiJson: (cameraForm.value.roiJson || '').trim() || null
+                    })
+                });
+                successMsg.value = '通道 ' + cid + ' 已注册到车位 ' + sid;
+                cameraForm.value = { cameraId: '', spaceId: '', protocol: 'RTSP', streamUrl: '', roiJson: '' };
+                await fetchCameras();
+            } catch (e) {
+                errorMsg.value = '注册通道失败: ' + e.message;
+            } finally {
+                savingCamera.value = false;
+            }
+        };
+
+        const removeCamera = async (cameraId) => {
+            if (!confirm('确认删除摄像头通道 ' + cameraId + ' ?')) return;
+            try {
+                await apiFetch('/api/v1/cameras/' + encodeURIComponent(cameraId), { method: 'DELETE' });
+                successMsg.value = '已删除摄像头通道 ' + cameraId;
+                await fetchCameras();
+            } catch (e) {
+                errorMsg.value = '删除失败: ' + e.message;
+            }
+        };
+
+        const silenceSpace = async (spaceId) => {
+            try {
+                await apiFetch('/api/v1/spaces/' + encodeURIComponent(spaceId) + '/silence', { method: 'POST', body: '{}' });
+                successMsg.value = '已对车位 ' + spaceId + ' 下发本地消音';
+                await Promise.all([fetchSpaces(), fetchRelays()]);
+            } catch (e) {
+                errorMsg.value = '消音失败: ' + e.message;
+            }
+        };
+
+        const copyText = async (text, notice) => {
+            try {
+                if (navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                }
+                successMsg.value = notice || '已复制';
+            } catch (_) {
+                errorMsg.value = '浏览器不支持自动复制，请手动选择复制';
+            }
+        };
+
+        const onSnapLoad = (spaceId) => {
+            snapErrors.value = { ...snapErrors.value, [spaceId]: false };
+        };
+        const onSnapError = (spaceId) => {
+            snapErrors.value = { ...snapErrors.value, [spaceId]: true };
+        };
+
+        const restartStreamTimer = () => {
+            if (streamTimer) clearInterval(streamTimer);
+            if (liveStreamActive.value) {
+                streamTimer = setInterval(() => {
+                    snapshotTimestamp.value = Date.now();
+                }, streamIntervalSeconds.value * 1000);
+            }
+        };
+
+        const toggleLiveStream = () => {
+            liveStreamActive.value = !liveStreamActive.value;
+            restartStreamTimer();
+        };
+
+        const setStreamInterval = (sec) => {
+            streamIntervalSeconds.value = sec;
+            restartStreamTimer();
+        };
+
+        const refreshSnapshotsNow = () => {
+            snapshotTimestamp.value = Date.now();
+        };
+
+        const openLiveModal = (space) => {
+            activePreviewSpace.value = space;
+        };
+
+        const viewSpaceSnapshot = (space) => {
+            currentTab.value = 'cameras';
+            activePreviewSpace.value = space;
+        };
+
+        const spacesList = computed(() => Object.values(spaces.value).sort((a, b) => a.spaceId.localeCompare(b.spaceId)));
+        const chargersList = computed(() => [...chargers.value].sort((a, b) => a.spaceId.localeCompare(b.spaceId)));
+        const relaysList = computed(() => Object.values(relaysDetails.value || {}).sort((a, b) => a.spaceId.localeCompare(b.spaceId)));
+        const camerasOnlineCount = computed(() => cameras.value.filter((c) => (c.state || '').toUpperCase() === 'ONLINE').length);
+
+        const previewTargets = computed(() => {
+            const bySpace = {};
+            for (const sp of spacesList.value) {
+                bySpace[sp.spaceId] = sp;
+            }
+            for (const cam of cameras.value) {
+                if (!bySpace[cam.spaceId]) {
+                    bySpace[cam.spaceId] = { spaceId: cam.spaceId, plate: null, vehicleType: 'UNKNOWN', streamType: cam.protocol };
+                }
+            }
+            return Object.values(bySpace).sort((a, b) => a.spaceId.localeCompare(b.spaceId));
+        });
+
+        const countOccupied = computed(() => spacesList.value.filter((s) => s.phase && s.phase !== 'EMPTY').length);
+        const countAlarming = computed(() => spacesList.value.filter((s) => s.alarming).length);
+        const countCharging = computed(() => chargersList.value.filter((c) => (c.status || '').toUpperCase() === 'CHARGING').length);
+
+        const cloudStatusText = computed(() => {
+            if (!health.value.cloudConfigured) return '独立离线运行';
+            return health.value.cloudConnected ? '云边实时联机' : '云端断开 (断网续传缓存)';
+        });
+        const cloudStatusClass = computed(() => {
+            if (!health.value.cloudConfigured) return 'bg-slate-800 text-slate-300 border border-slate-700';
+            return health.value.cloudConnected ? 'bg-emerald-950 text-emerald-300 border border-emerald-700' : 'bg-amber-950 text-amber-300 border border-amber-700';
+        });
+        const cloudDotClass = computed(() => {
+            if (!health.value.cloudConfigured) return 'bg-slate-400';
+            return health.value.cloudConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400';
+        });
+
+        const getCameraForSpace = (spaceId) => cameras.value.find((c) => c.spaceId === spaceId);
+
+        const plateBadgeClass = (plate, vType) => {
+            const vt = (vType || '').toUpperCase();
+            if (vt === 'NEW_ENERGY' || (plate && plate.length === 8)) return 'plate-badge-green';
+            if (vt === 'FUEL') return 'plate-badge-blue';
+            return 'plate-badge-yellow';
+        };
+
+        const vehicleTypeLabel = (v) => {
+            const vt = (v || '').toUpperCase();
+            if (vt === 'NEW_ENERGY') return '🟢 新能源车';
+            if (vt === 'FUEL') return '🔵 燃油车';
+            return '⚪ 未识别';
+        };
+
+        const phaseLabel = (p) => {
+            switch ((p || '').toUpperCase()) {
+                case 'EMPTY': return '空闲';
+                case 'ENTERING': return '驶入防抖';
+                case 'OCCUPIED': return '确认在位';
+                case 'LEAVING': return '驶离防抖';
+                default: return p || '--';
+            }
+        };
+
+        const phaseBadgeClass = (p) => {
+            switch ((p || '').toUpperCase()) {
+                case 'OCCUPIED': return 'bg-blue-100 text-blue-800 font-bold';
+                case 'ENTERING': return 'bg-amber-100 text-amber-800';
+                case 'LEAVING': return 'bg-purple-100 text-purple-800';
+                default: return 'bg-slate-100 text-slate-600';
+            }
+        };
+
+        const chargerStatusLabel = (s) => {
+            switch ((s || '').toUpperCase()) {
+                case 'IDLE': return '空闲待充';
+                case 'PREPARING': return '插枪准备';
+                case 'CHARGING': return '充电中';
+                case 'COMPLETED': return '充满结束';
+                case 'FAULT': return '故障';
+                case 'OFFLINE': return '离线';
+                default: return '未知';
+            }
+        };
+
+        const chargerStatusBadge = (s) => {
+            switch ((s || '').toUpperCase()) {
+                case 'CHARGING': return 'bg-emerald-100 text-emerald-800';
+                case 'COMPLETED': return 'bg-blue-100 text-blue-800';
+                case 'PREPARING': return 'bg-amber-100 text-amber-800';
+                case 'FAULT':
+                case 'OFFLINE': return 'bg-red-100 text-red-800';
+                default: return 'bg-slate-100 text-slate-600';
+            }
+        };
+
+        const cameraStateBadge = (st) => {
+            switch ((st || '').toUpperCase()) {
+                case 'ONLINE': return 'bg-emerald-100 text-emerald-800';
+                case 'REGISTERED': return 'bg-blue-100 text-blue-800';
+                case 'OFFLINE': return 'bg-amber-100 text-amber-800';
+                case 'ERROR': return 'bg-red-100 text-red-800';
+                default: return 'bg-slate-100 text-slate-600';
+            }
+        };
+
+        const formatTimestamp = (ts) => ts ? new Date(ts).toLocaleString() : '--';
+        const formatPct = (v) => (typeof v === 'number' && !Number.isNaN(v)) ? v.toFixed(1) + '%' : '--';
+        const formatUptime = (sec) => {
+            if (!sec && sec !== 0) return '--';
+            const h = Math.floor(sec / 3600);
+            const m = Math.floor((sec % 3600) / 60);
+            return h + 'h ' + m + 'm';
+        };
+
+        onMounted(() => {
+            refreshAll();
+            pollTimer = setInterval(async () => {
+                if (showKeyModal.value) return;
+                try {
+                    await Promise.all([
+                        fetchHealth(),
+                        fetchTelemetry(),
+                        fetchSpaces(),
+                        fetchCameras(),
+                        fetchChargers(),
+                        fetchRelays()
+                    ]);
+                } catch (_) {}
+            }, 3000);
+            restartStreamTimer();
+        });
+
+        onUnmounted(() => {
+            if (pollTimer) clearInterval(pollTimer);
+            if (streamTimer) clearInterval(streamTimer);
+        });
+
+        return {
+            apiKey, apiKeyDraft, showKeyModal, authRequired, authError,
+            openKeyModal, applyApiKey, clearApiKey,
+            currentTab, tabs, loading, savingConfig, savingCamera,
+            errorMsg, successMsg, health, telemetry, spacesList,
+            cameras, chargersList, relaysList, rules, networkStatus, systemConfig,
+            cameraForm, snapshotTimestamp, liveStreamActive, streamIntervalSeconds,
+            activePreviewSpace, snapErrors, previewTargets, camerasOnlineCount,
+            countOccupied, countAlarming, countCharging,
+            cloudStatusText, cloudStatusClass, cloudDotClass,
+            refreshAll, saveSystemConfig, submitRegisterCamera, removeCamera,
+            silenceSpace, copyText, onSnapLoad, onSnapError,
+            toggleLiveStream, setStreamInterval, refreshSnapshotsNow,
+            openLiveModal, viewSpaceSnapshot, getCameraForSpace,
+            plateBadgeClass, vehicleTypeLabel, phaseLabel, phaseBadgeClass,
+            chargerStatusLabel, chargerStatusBadge, cameraStateBadge,
+            formatTimestamp, formatPct, formatUptime
+        };
+    }
+}).mount('#app');
+</script>
+</body>
+</html>
