@@ -13,7 +13,7 @@ from typing import Any
 import requests
 
 from config import VisionConfig
-from plate_recognizer import HyperLpr3Recognizer
+from ai_engine import UnifiedAiEngine
 from rtsp_worker import CameraTarget, RtspCameraWorker
 
 logging.basicConfig(
@@ -28,7 +28,12 @@ class VisionManager:
 
     def __init__(self, config: VisionConfig) -> None:
         self.config = config
-        self.recognizer = HyperLpr3Recognizer(min_confidence=config.min_confidence)
+        self.ai_engine = UnifiedAiEngine(
+            yolo_weights="weights/yolov8n.pt",
+            plate_detect_weights="weights/yolo26s-plate-detect.pt",
+            plate_rec_weights="weights/plate_rec_color.pth",
+            device="cpu",
+        )
         self._lock = threading.Lock()
         self._workers: dict[str, RtspCameraWorker] = {}
         self._stop_event = threading.Event()
@@ -108,7 +113,7 @@ class VisionManager:
                 if current is not None:
                     logger.info("restarting updated camera worker %s", cam_id)
                     self._workers.pop(cam_id).stop()
-                worker = RtspCameraWorker(target, self.config, self.recognizer)
+                worker = RtspCameraWorker(target, self.config, self.ai_engine)
                 worker.start()
                 self._workers[cam_id] = worker
 

@@ -1033,6 +1033,8 @@ createApp({
             const vt = (vType || '').toUpperCase();
             if (vt === 'NEW_ENERGY' || (plate && plate.length === 8)) return 'plate-badge-green';
             if (vt === 'FUEL') return 'plate-badge-blue';
+            if (vt === 'SPECIAL_VEHICLE') return 'bg-white text-slate-900 border border-slate-300';
+            if (vt === 'NON_MOTOR' || vt === 'OBSTACLE') return 'bg-red-900 text-red-200 border border-red-500';
             return 'plate-badge-yellow';
         };
 
@@ -1040,7 +1042,11 @@ createApp({
             const vt = (v || '').toUpperCase();
             if (vt === 'NEW_ENERGY') return '🟢 新能源车';
             if (vt === 'FUEL') return '🔵 燃油车';
-            return '⚪ 未识别';
+            if (vt === 'NON_MOTOR') return '🛵 两轮车/非机动车';
+            if (vt === 'OBSTACLE') return '🪑 桌椅杂物占位';
+            if (vt === 'SPECIAL_VEHICLE') return '⚪ 特种车(军/警)';
+            if (vt === 'HEAVY_VEHICLE') return '🚚 大客货车';
+            return '⚪ 未知/待识别';
         };
 
         const phaseLabel = (p) => {

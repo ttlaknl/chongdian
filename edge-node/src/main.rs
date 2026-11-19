@@ -1461,6 +1461,10 @@ fn infer_plate_color(
     match vehicle_type {
         charging_space_edge::VehicleType::NewEnergy => "GREEN".into(),
         charging_space_edge::VehicleType::Fuel => "BLUE".into(),
+        charging_space_edge::VehicleType::SpecialVehicle => "WHITE".into(),
+        charging_space_edge::VehicleType::HeavyVehicle => "YELLOW".into(),
+        charging_space_edge::VehicleType::NonMotor => "TWO_WHEELER".into(),
+        charging_space_edge::VehicleType::Obstacle => "OBSTACLE".into(),
         charging_space_edge::VehicleType::Unknown => "UNKNOWN".into(),
     }
 }
@@ -1807,6 +1811,10 @@ async fn handle_detection(
             || rec_color == "YELLOW"
             || tracker.candidate_vehicle_type == charging_space_edge::VehicleType::Fuel;
 
+        let is_obstacle_or_nonmotor = detection.vehicle_type == charging_space_edge::VehicleType::NonMotor
+            || detection.vehicle_type == charging_space_edge::VehicleType::Obstacle
+            || detection.vehicle_type == charging_space_edge::VehicleType::HeavyVehicle;
+
         let is_whitelisted = s
             .whitelist
             .contains(rec_plate.as_deref(), detection.captured_at)
@@ -1814,8 +1822,7 @@ async fn handle_detection(
 
         let judgment_status = if is_whitelisted {
             "WHITELIST_ALLOWED".into()
-        } else if is_fuel {
-            // 燃油车/蓝牌车占用充电车位，绝对属于违规占位，禁止判定为 NORMAL
+        } else if is_fuel || is_obstacle_or_nonmotor {
             "VIOLATION".into()
         } else if evaluation_result
             .as_ref()
@@ -1827,19 +1834,25 @@ async fn handle_detection(
             "NORMAL".into()
         };
 
-        // 如果是燃油车且未在白名单中，即便在进场观察期也立即启动声光告警与抓拍取证
-        if is_fuel && !is_whitelisted {
+        // 如果是燃油车或非法占用（两轮车/桌椅杂物/大货车）且未在白名单中，即便在进场观察期也立即启动声光告警与抓拍取证
+        if (is_fuel || is_obstacle_or_nonmotor) && !is_whitelisted {
             let _ = s.relay.set_alarm(&space_id, true);
             is_alarming = true;
             s.metrics.record_alarm();
             s.metrics.record_violation();
             if tracker.last_evidence_path.is_none() {
                 let p_str = rec_plate.as_deref().unwrap_or("UNKNOWN");
+                let viol_type = match detection.vehicle_type {
+                    charging_space_edge::VehicleType::NonMotor => "NON_MOTOR_VEHICLE",
+                    charging_space_edge::VehicleType::Obstacle => "OBSTACLE_OCCUPATION",
+                    charging_space_edge::VehicleType::HeavyVehicle => "HEAVY_VEHICLE",
+                    _ => "FUEL_VEHICLE",
+                };
                 let _ = maybe_capture_space_evidence(
                     &s,
                     &space_id,
                     p_str,
-                    "FUEL_VEHICLE",
+                    viol_type,
                     detection.is_simulated,
                     &detection.data_source,
                     None,

@@ -294,6 +294,10 @@ public class CloudStore {
     return switch (type) {
       case "FUEL" -> "燃油车";
       case "NEW_ENERGY" -> "新能源车";
+      case "NON_MOTOR" -> "非机动车/两轮车";
+      case "OBSTACLE" -> "杂物/桌椅障碍物";
+      case "SPECIAL_VEHICLE" -> "特种车辆(军/警)";
+      case "HEAVY_VEHICLE" -> "大客货车";
       default -> type;
     };
   }
@@ -302,6 +306,9 @@ public class CloudStore {
     if (type == null) return "未知违规";
     return switch (type) {
       case "FUEL_VEHICLE" -> "燃油车占用充电位";
+      case "NON_MOTOR_VEHICLE" -> "两轮车/非机动车占用充电位";
+      case "OBSTACLE_OCCUPATION" -> "杂物桌椅占用充电位";
+      case "HEAVY_VEHICLE" -> "大客货车占用充电位";
       case "NOT_CHARGING_OVERTIME" -> "新能源车超时未充电";
       case "CHARGE_COMPLETED_OVERTIME" -> "充电完成超时滞留";
       case "CHARGER_STATUS_UNAVAILABLE" -> "充电桩离线滞留";
@@ -2992,7 +2999,12 @@ public class CloudStore {
           : (isOccupied ? "UNKNOWN" : "NONE");
       String plate = isOccupied ? (st.plate() != null && !st.plate().isBlank() ? st.plate() : null) : null;
       String plateColor = "NEW_ENERGY".equalsIgnoreCase(vehicleType) ? "GREEN"
-          : (isOccupied && "FUEL".equalsIgnoreCase(vehicleType) ? "BLUE" : (isOccupied ? "UNKNOWN" : "EMPTY"));
+          : (isOccupied && "FUEL".equalsIgnoreCase(vehicleType) ? "BLUE"
+          : (isOccupied && "SPECIAL_VEHICLE".equalsIgnoreCase(vehicleType) ? "WHITE"
+          : (isOccupied && "HEAVY_VEHICLE".equalsIgnoreCase(vehicleType) ? "YELLOW"
+          : (isOccupied && "NON_MOTOR".equalsIgnoreCase(vehicleType) ? "TWO_WHEELER"
+          : (isOccupied && "OBSTACLE".equalsIgnoreCase(vehicleType) ? "OBSTACLE"
+          : (isOccupied ? "UNKNOWN" : "EMPTY"))))));
 
       String judgmentStatus;
       if (!isOccupied) {
@@ -3001,9 +3013,11 @@ public class CloudStore {
         judgmentStatus = "VIOLATION_ALARMING";
       } else if ("NEW_ENERGY".equalsIgnoreCase(vehicleType)) {
         judgmentStatus = "CHARGING".equalsIgnoreCase(st.chargerStatus()) ? "NORMAL_CHARGING" : "GRACE_PERIOD";
+      } else if ("SPECIAL_VEHICLE".equalsIgnoreCase(vehicleType)) {
+        judgmentStatus = "SPECIAL_ALLOWED";
       } else if (plate != null && isWhitelisted(effectiveSiteId, plate)) {
         judgmentStatus = "WHITELIST_ALLOWED";
-      } else if ("FUEL".equalsIgnoreCase(vehicleType)) {
+      } else if ("FUEL".equalsIgnoreCase(vehicleType) || "NON_MOTOR".equalsIgnoreCase(vehicleType) || "OBSTACLE".equalsIgnoreCase(vehicleType) || "HEAVY_VEHICLE".equalsIgnoreCase(vehicleType)) {
         judgmentStatus = "VIOLATION_ALARMING";
       } else {
         judgmentStatus = "GRACE_PERIOD";

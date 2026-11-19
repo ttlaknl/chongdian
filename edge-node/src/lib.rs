@@ -57,6 +57,10 @@ pub use metrics::*;
 pub enum VehicleType {
     Fuel,
     NewEnergy,
+    NonMotor,
+    Obstacle,
+    SpecialVehicle,
+    HeavyVehicle,
     Unknown,
 }
 
@@ -744,6 +748,38 @@ pub fn evaluate(input: &EvaluationInput, rules: &RuleConfig) -> EvaluationResult
     };
     if input.whitelisted {
         return base(Decision::Whitelisted, None, false, "车牌在白名单中");
+    }
+    if input.vehicle_type == VehicleType::SpecialVehicle {
+        return base(
+            Decision::Compliant,
+            None,
+            false,
+            "特种车辆合规停放(军/警车牌)",
+        );
+    }
+    if input.vehicle_type == VehicleType::NonMotor {
+        return base(
+            Decision::Violation,
+            Some("NON_MOTOR_VEHICLE".into()),
+            true,
+            "两轮车/非机动车占用充电车位",
+        );
+    }
+    if input.vehicle_type == VehicleType::Obstacle {
+        return base(
+            Decision::Violation,
+            Some("OBSTACLE_OCCUPATION".into()),
+            true,
+            "桌椅杂物非法占用充电车位",
+        );
+    }
+    if input.vehicle_type == VehicleType::HeavyVehicle {
+        return base(
+            Decision::Violation,
+            Some("HEAVY_VEHICLE".into()),
+            true,
+            "大客货车违规占用充电车位",
+        );
     }
     if input.vehicle_type == VehicleType::Fuel {
         return base(

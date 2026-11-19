@@ -411,6 +411,10 @@ impl SqliteStorage {
         let v_type_str = match v_type {
             VehicleType::Fuel => "FUEL",
             VehicleType::NewEnergy => "NEW_ENERGY",
+            VehicleType::NonMotor => "NON_MOTOR",
+            VehicleType::Obstacle => "OBSTACLE",
+            VehicleType::SpecialVehicle => "SPECIAL_VEHICLE",
+            VehicleType::HeavyVehicle => "HEAVY_VEHICLE",
             VehicleType::Unknown => "UNKNOWN",
         };
 
@@ -818,6 +822,10 @@ impl SqliteStorage {
         let v_type_str = match rec.vehicle_type {
             VehicleType::Fuel => "FUEL",
             VehicleType::NewEnergy => "NEW_ENERGY",
+            VehicleType::NonMotor => "NON_MOTOR",
+            VehicleType::Obstacle => "OBSTACLE",
+            VehicleType::SpecialVehicle => "SPECIAL_VEHICLE",
+            VehicleType::HeavyVehicle => "HEAVY_VEHICLE",
             VehicleType::Unknown => "UNKNOWN",
         };
         conn.execute(
@@ -863,6 +871,10 @@ impl SqliteStorage {
                 let vehicle_type = match v_str.as_str() {
                     "FUEL" => VehicleType::Fuel,
                     "NEW_ENERGY" => VehicleType::NewEnergy,
+                    "NON_MOTOR" => VehicleType::NonMotor,
+                    "OBSTACLE" => VehicleType::Obstacle,
+                    "SPECIAL_VEHICLE" => VehicleType::SpecialVehicle,
+                    "HEAVY_VEHICLE" => VehicleType::HeavyVehicle,
                     _ => VehicleType::Unknown,
                 };
                 let recognized_at = DateTime::parse_from_rfc3339(&row.get::<_, String>(11)?)
@@ -980,6 +992,10 @@ fn map_event_row(row: &Row<'_>) -> rusqlite::Result<CloudEvent> {
     let vehicle_type = match row.get::<_, String>(4)?.as_str() {
         "FUEL" => VehicleType::Fuel,
         "NEW_ENERGY" => VehicleType::NewEnergy,
+        "NON_MOTOR" => VehicleType::NonMotor,
+        "OBSTACLE" => VehicleType::Obstacle,
+        "SPECIAL_VEHICLE" => VehicleType::SpecialVehicle,
+        "HEAVY_VEHICLE" => VehicleType::HeavyVehicle,
         _ => VehicleType::Unknown,
     };
     let violation_type: Option<String> = row.get(5)?;

@@ -1,4 +1,4 @@
-"""Dedicated RTSP camera stream worker pushing real JPEG snapshots and AI detections to Edge Node."""
+"""Dedicated RTSP camera stream worker running YOLO26 & plate perception and pushing real JPEG snapshots + detections to Edge Node."""
 
 from __future__ import annotations
 
@@ -15,12 +15,7 @@ import cv2
 import requests
 
 from config import VisionConfig
-from plate_recognizer import (
-    HyperLpr3Recognizer,
-    PlateVoteBuffer,
-    crop_roi,
-    is_valid_chinese_plate,
-)
+from ai_engine import UnifiedAiEngine, SpacePerception
 
 logger = logging.getLogger("vision.worker")
 
@@ -39,23 +34,17 @@ class CameraTarget:
 
 
 class RtspCameraWorker:
-    """Runs an RTSP TCP reader thread and an AI inference/upload thread for one camera."""
+    """Runs an RTSP reader thread and a YOLO26 AI inference/upload thread for one camera."""
 
     def __init__(
         self,
         target: CameraTarget,
         config: VisionConfig,
-        recognizer: HyperLpr3Recognizer,
+        ai_engine: UnifiedAiEngine,
     ) -> None:
         self.target = target
         self.config = config
-        self.recognizer = recognizer
-        self.voter = PlateVoteBuffer(
-            window_size=config.vote_window,
-            min_hits=config.vote_min_hits,
-            min_confidence=config.min_confidence,
-            empty_clear_frames=config.empty_clear_frames,
-        )
+        self.ai_engine = ai_engine
 
         self._stop_event = threading.Event()
         self._frame_lock = threading.Lock()
@@ -72,6 +61,7 @@ class RtspCameraWorker:
         self._last_has_vehicle: bool | None = None
         self._last_confidence: float = 0.0
         self._last_frame_iso: str | None = None
+        self._last_label: str = ""
 
         self._reader_thread = threading.Thread(
             target=self._reader_loop,
@@ -86,7 +76,7 @@ class RtspCameraWorker:
 
     def start(self) -> None:
         logger.info(
-            "starting worker camera=%s space=%s stream=%s",
+            "starting worker camera=%s space=%s stream=%s (YOLO26-Perception)",
             self.target.camera_id,
             self.target.space_id,
             self._safe_stream_label(),
@@ -109,6 +99,7 @@ class RtspCameraWorker:
             "lastPlate": self._last_plate,
             "lastVehicleType": self._last_vehicle_type,
             "lastConfidence": self._last_confidence,
+            "lastLabel": self._last_label,
             "reconnectCount": self._reconnect_count,
             "lastError": self._last_error,
         }
@@ -200,88 +191,91 @@ class RtspCameraWorker:
                 self._stop_event.wait(0.5)
                 continue
 
-            roi_frame = crop_roi(frame, self.target.roi_json)
-            detection = None
+            perception: SpacePerception | None = None
             try:
-                detection = self.recognizer.recognize(roi_frame)
-                if detection is not None:
-                    logger.info(
-                        "camera=%s raw plate candidate: %s [%s] conf=%.2f",
-                        self.target.camera_id,
-                        detection.plate,
-                        detection.plate_color,
-                        detection.confidence,
-                    )
-                    if is_valid_chinese_plate(detection.plate):
-                        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                        if ok:
-                            self._latest_plate_jpeg = encoded.tobytes()
+                perception = self.ai_engine.evaluate_space(
+                    frame,
+                    self.target.space_id,
+                    self.target.roi_json,
+                )
+                if perception.has_vehicle:
+                    # 如果有目标且存在识别框/证据帧，保存作为高质取证图
+                    ev_frame = perception.evidence_frame if perception.evidence_frame is not None else frame
+                    ok, encoded = cv2.imencode(".jpg", ev_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    if ok:
+                        self._latest_plate_jpeg = encoded.tobytes()
+                else:
+                    self._latest_plate_jpeg = None
             except Exception as exc:  # noqa: BLE001
-                self._last_error = f"LPR inference error: {exc}"
+                self._last_error = f"YOLO26 inference error: {exc}"
                 logger.exception("camera=%s inference failure", self.target.camera_id)
 
-            vote = self.voter.update(detection)
+            if perception is None:
+                self._stop_event.wait(0.5)
+                continue
+
             state_changed = (
-                vote.confirmed
-                and (
-                    self._last_has_vehicle != vote.has_vehicle
-                    or self._last_plate != vote.plate
-                    or self._last_vehicle_type != vote.vehicle_type
-                )
+                self._last_has_vehicle != perception.has_vehicle
+                or self._last_plate != perception.plate
+                or self._last_vehicle_type != perception.vehicle_type
             )
+
             if state_changed:
-                if vote.has_vehicle:
+                if perception.has_vehicle:
                     logger.info(
-                        "camera=%s space=%s >>> CONFIRMED VEHICLE: plate=%s, color=%s, type=%s, conf=%.2f <<<",
+                        "camera=%s space=%s >>> DETECTED OCCUPANCY: plate=%s, color=%s, type=%s, viol=%s, label=%s, conf=%.2f <<<",
                         self.target.camera_id,
                         self.target.space_id,
-                        vote.plate,
-                        vote.plate_color,
-                        vote.vehicle_type,
-                        vote.confidence,
+                        perception.plate,
+                        perception.plate_color,
+                        perception.vehicle_type,
+                        perception.violation_type,
+                        perception.category_label,
+                        perception.confidence,
                     )
                 else:
                     logger.info(
-                        "camera=%s space=%s >>> CONFIRMED EMPTY (space cleared) <<<",
+                        "camera=%s space=%s >>> SPACE CLEARED (empty) <<<",
                         self.target.camera_id,
                         self.target.space_id,
                     )
-                    self._latest_plate_jpeg = None
 
-            if vote.confirmed:
-                self._last_has_vehicle = vote.has_vehicle
-                self._last_plate = vote.plate
-                self._last_vehicle_type = vote.vehicle_type
-                self._last_confidence = vote.confidence
+            self._last_has_vehicle = perception.has_vehicle
+            self._last_plate = perception.plate
+            self._last_vehicle_type = perception.vehicle_type
+            self._last_confidence = perception.confidence
+            self._last_label = perception.category_label
 
             now = time.monotonic()
 
             # Push real JPEG frame to Edge when snapshot cadence arrives or vehicle/plate state changes.
             if (now - last_snapshot_push) >= self.config.snapshot_seconds or state_changed:
-                if vote.has_vehicle and self._latest_plate_jpeg is not None:
+                if perception.has_vehicle and self._latest_plate_jpeg is not None:
                     self._push_snapshot_bytes(self._latest_plate_jpeg, force_cloud=state_changed)
                 else:
                     self._push_snapshot(frame, force_cloud=state_changed)
                 last_snapshot_push = now
 
-            # Push detection on confirmed state transition or periodic refresh every 3 seconds.
+            # Push detection on state transition or periodic refresh every 3 seconds.
             if frame_ts > last_frame_seen_ts and (
                 state_changed or (now - last_detection_push) >= 3.0
             ):
-                if vote.confirmed or not vote.has_vehicle:
-                    self._push_detection(vote, current_frame=frame)
-                    last_detection_push = now
+                self._push_detection(perception, frame)
+                last_detection_push = now
                 last_frame_seen_ts = frame_ts
 
             if (now - last_heartbeat_push) >= self.config.heartbeat_seconds:
                 self._push_heartbeat()
                 last_heartbeat_push = now
 
-            elapsed = time.monotonic() - loop_started
-            sleep_for = max(0.05, interval - elapsed)
-            self._stop_event.wait(sleep_for)
+            spent = time.monotonic() - loop_started
+            remaining = interval - spent
+            if remaining > 0:
+                self._stop_event.wait(remaining)
 
     def _push_snapshot_bytes(self, jpeg_bytes: bytes, force_cloud: bool = False) -> None:
+        if not self._connected:
+            return
         url = f"{self.config.edge_url}/api/v1/spaces/{self.target.space_id}/snapshot"
         extra = {"Content-Type": "image/jpeg"}
         if force_cloud:
@@ -304,24 +298,23 @@ class RtspCameraWorker:
             return
         self._push_snapshot_bytes(encoded.tobytes(), force_cloud=force_cloud)
 
-    def _push_detection(self, vote: Any, current_frame: Any = None) -> None:
+    def _push_detection(self, perception: SpacePerception, current_frame: Any = None) -> None:
         url = f"{self.config.edge_url}/api/v1/spaces/{self.target.space_id}/detections"
         payload = {
             "spaceId": self.target.space_id,
-            "hasVehicle": vote.has_vehicle,
-            "plate": vote.plate,
-            "vehicleType": vote.vehicle_type,
+            "hasVehicle": perception.has_vehicle,
+            "plate": perception.plate,
+            "vehicleType": perception.vehicle_type,
             "capturedAt": datetime.now(timezone.utc).isoformat(),
             "isSimulated": False,
-            "dataSource": "RTSP_VISION_AI",
-            "confidence": vote.confidence,
-            "plateColor": vote.plate_color,
+            "dataSource": "RTSP_YOLO26_AI",
+            "confidence": perception.confidence,
+            "plateColor": perception.plate_color,
             "cameraId": self.target.camera_id,
         }
 
-        # 确保关键识别帧与证据图片强绑定：若在位且已捕捉到带车牌的视频帧，优先附送该帧
         frame_bytes = None
-        if vote.has_vehicle and self._latest_plate_jpeg is not None:
+        if perception.has_vehicle and self._latest_plate_jpeg is not None:
             frame_bytes = self._latest_plate_jpeg
         elif current_frame is not None:
             ok, enc = cv2.imencode(".jpg", current_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
