@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "updatedAt": "2026-09-08T12:00:00Z",
+  "version": 2,
+  "updatedAt": "2026-11-20T12:00:00Z",
   "rules": {
     "unchargedGraceSeconds": 600,
     "completedGraceSeconds": 900,
@@ -12,11 +12,101 @@
     "unknownStatusAction": "WAIT",
     "faultStatusAction": "ALLOW"
   },
+  "cameras": [
+    {
+      "cameraId": "CAM-01",
+      "streamUrl": "rtsp://admin:a1234567@192.168.1.101:554/h264/ch1/main/av_stream",
+      "subRtspUrl": "rtsp://admin:a1234567@192.168.1.101:554/h264/ch1/sub/av_stream",
+      "preEntryPolygon": [[0.10, 0.05], [0.90, 0.05], [0.90, 0.35], [0.10, 0.35]],
+      "spaces": [
+        {"spaceId": "A-01", "polygon": [[0.05, 0.35], [0.48, 0.35], [0.48, 0.95], [0.05, 0.95]]},
+        {"spaceId": "A-02", "polygon": [[0.52, 0.35], [0.95, 0.35], [0.95, 0.95], [0.52, 0.95]]}
+      ],
+      "enabled": true
+    },
+    {
+      "cameraId": "CAM-02",
+      "streamUrl": "rtsp://admin:a1234567@192.168.1.102:554/h264/ch1/main/av_stream",
+      "subRtspUrl": "rtsp://admin:a1234567@192.168.1.102:554/h264/ch1/sub/av_stream",
+      "preEntryPolygon": [[0.10, 0.05], [0.90, 0.05], [0.90, 0.35], [0.10, 0.35]],
+      "spaces": [
+        {"spaceId": "A-03", "polygon": [[0.05, 0.35], [0.48, 0.35], [0.48, 0.95], [0.05, 0.95]]},
+        {"spaceId": "A-04", "polygon": [[0.52, 0.35], [0.95, 0.35], [0.95, 0.95], [0.52, 0.95]]}
+      ],
+      "enabled": true
+    },
+    {
+      "cameraId": "CAM-03",
+      "streamUrl": "rtsp://admin:a1234567@192.168.1.103:554/h264/ch1/main/av_stream",
+      "subRtspUrl": "rtsp://admin:a1234567@192.168.1.103:554/h264/ch1/sub/av_stream",
+      "preEntryPolygon": [[0.10, 0.05], [0.90, 0.05], [0.90, 0.35], [0.10, 0.35]],
+      "spaces": [
+        {"spaceId": "A-05", "polygon": [[0.05, 0.35], [0.48, 0.35], [0.48, 0.95], [0.05, 0.95]]},
+        {"spaceId": "A-06", "polygon": [[0.52, 0.35], [0.95, 0.35], [0.95, 0.95], [0.52, 0.95]]}
+      ],
+      "enabled": true
+    },
+    {
+      "cameraId": "CAM-04",
+      "streamUrl": "rtsp://admin:a1234567@192.168.1.104:554/h264/ch1/main/av_stream",
+      "subRtspUrl": "rtsp://admin:a1234567@192.168.1.104:554/h264/ch1/sub/av_stream",
+      "preEntryPolygon": [[0.10, 0.05], [0.90, 0.05], [0.90, 0.35], [0.10, 0.35]],
+      "spaces": [
+        {"spaceId": "A-07", "polygon": [[0.05, 0.35], [0.48, 0.35], [0.48, 0.95], [0.05, 0.95]]},
+        {"spaceId": "A-08", "polygon": [[0.52, 0.35], [0.95, 0.35], [0.95, 0.95], [0.52, 0.95]]}
+      ],
+      "enabled": true
+    },
+    {
+      "cameraId": "CAM-05",
+      "streamUrl": "rtsp://admin:a1234567@192.168.1.105:554/h264/ch1/main/av_stream",
+      "subRtspUrl": "rtsp://admin:a1234567@192.168.1.105:554/h264/ch1/sub/av_stream",
+      "preEntryPolygon": [[0.10, 0.05], [0.90, 0.05], [0.90, 0.35], [0.10, 0.35]],
+      "spaces": [
+        {"spaceId": "A-09", "polygon": [[0.05, 0.35], [0.48, 0.35], [0.48, 0.95], [0.05, 0.95]]},
+        {"spaceId": "A-10", "polygon": [[0.52, 0.35], [0.95, 0.35], [0.95, 0.95], [0.52, 0.95]]}
+      ],
+      "enabled": true
+    },
+    {
+      "cameraId": "CAM-06",
+      "streamUrl": "rtsp://admin:a1234567@192.168.1.106:554/h264/ch1/main/av_stream",
+      "subRtspUrl": "rtsp://admin:a1234567@192.168.1.106:554/h264/ch1/sub/av_stream",
+      "preEntryPolygon": [[0.10, 0.05], [0.90, 0.05], [0.90, 0.35], [0.10, 0.35]],
+      "spaces": [
+        {"spaceId": "A-11", "polygon": [[0.05, 0.35], [0.48, 0.35], [0.48, 0.95], [0.05, 0.95]]},
+        {"spaceId": "A-12", "polygon": [[0.52, 0.35], [0.95, 0.35], [0.95, 0.95], [0.52, 0.95]]}
+      ],
+      "enabled": true
+    },
+    {
+      "cameraId": "CAM-07",
+      "streamUrl": "rtsp://admin:a1234567@192.168.1.107:554/h264/ch1/main/av_stream",
+      "subRtspUrl": "rtsp://admin:a1234567@192.168.1.107:554/h264/ch1/sub/av_stream",
+      "preEntryPolygon": [[0.10, 0.05], [0.90, 0.05], [0.90, 0.35], [0.10, 0.35]],
+      "spaces": [
+        {"spaceId": "A-13", "polygon": [[0.05, 0.35], [0.48, 0.35], [0.48, 0.95], [0.05, 0.95]]},
+        {"spaceId": "A-14", "polygon": [[0.52, 0.35], [0.95, 0.35], [0.95, 0.95], [0.52, 0.95]]}
+      ],
+      "enabled": true
+    },
+    {
+      "cameraId": "CAM-08",
+      "streamUrl": "rtsp://admin:a1234567@192.168.1.108:554/h264/ch1/main/av_stream",
+      "subRtspUrl": "rtsp://admin:a1234567@192.168.1.108:554/h264/ch1/sub/av_stream",
+      "preEntryPolygon": [[0.10, 0.05], [0.90, 0.05], [0.90, 0.35], [0.10, 0.35]],
+      "spaces": [
+        {"spaceId": "A-15", "polygon": [[0.05, 0.35], [0.48, 0.35], [0.48, 0.95], [0.05, 0.95]]},
+        {"spaceId": "A-16", "polygon": [[0.52, 0.35], [0.95, 0.35], [0.95, 0.95], [0.52, 0.95]]}
+      ],
+      "enabled": true
+    }
+  ],
   "bindings": [
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-01",
-      "cameraId": "CAM-01-A01",
+      "cameraId": "CAM-01",
       "chargerId": "CHG-01-01",
       "relayChannel": 0,
       "enabled": true
@@ -24,7 +114,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-02",
-      "cameraId": "CAM-01-A02",
+      "cameraId": "CAM-01",
       "chargerId": "CHG-01-02",
       "relayChannel": 1,
       "enabled": true
@@ -32,7 +122,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-03",
-      "cameraId": "CAM-01-A03",
+      "cameraId": "CAM-02",
       "chargerId": "CHG-02-01",
       "relayChannel": 2,
       "enabled": true
@@ -40,7 +130,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-04",
-      "cameraId": "CAM-01-A04",
+      "cameraId": "CAM-02",
       "chargerId": "CHG-02-02",
       "relayChannel": 3,
       "enabled": true
@@ -48,7 +138,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-05",
-      "cameraId": "CAM-01-A05",
+      "cameraId": "CAM-03",
       "chargerId": "CHG-03-01",
       "relayChannel": 4,
       "enabled": true
@@ -56,7 +146,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-06",
-      "cameraId": "CAM-01-A06",
+      "cameraId": "CAM-03",
       "chargerId": "CHG-03-02",
       "relayChannel": 5,
       "enabled": true
@@ -64,7 +154,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-07",
-      "cameraId": "CAM-02-A07",
+      "cameraId": "CAM-04",
       "chargerId": "CHG-04-01",
       "relayChannel": 6,
       "enabled": true
@@ -72,7 +162,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-08",
-      "cameraId": "CAM-02-A08",
+      "cameraId": "CAM-04",
       "chargerId": "CHG-04-02",
       "relayChannel": 7,
       "enabled": true
@@ -80,7 +170,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-09",
-      "cameraId": "CAM-02-A09",
+      "cameraId": "CAM-05",
       "chargerId": "CHG-05-01",
       "relayChannel": 8,
       "enabled": true
@@ -88,7 +178,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-10",
-      "cameraId": "CAM-02-A10",
+      "cameraId": "CAM-05",
       "chargerId": "CHG-05-02",
       "relayChannel": 9,
       "enabled": true
@@ -96,7 +186,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-11",
-      "cameraId": "CAM-03-A11",
+      "cameraId": "CAM-06",
       "chargerId": "CHG-06-01",
       "relayChannel": 10,
       "enabled": true
@@ -104,7 +194,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-12",
-      "cameraId": "CAM-03-A12",
+      "cameraId": "CAM-06",
       "chargerId": "CHG-06-02",
       "relayChannel": 11,
       "enabled": true
@@ -112,7 +202,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-13",
-      "cameraId": "CAM-03-A13",
+      "cameraId": "CAM-07",
       "chargerId": "CHG-07-01",
       "relayChannel": 12,
       "enabled": true
@@ -120,7 +210,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-14",
-      "cameraId": "CAM-03-A14",
+      "cameraId": "CAM-07",
       "chargerId": "CHG-07-02",
       "relayChannel": 13,
       "enabled": true
@@ -128,7 +218,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-15",
-      "cameraId": "CAM-04-A15",
+      "cameraId": "CAM-08",
       "chargerId": "CHG-08-01",
       "relayChannel": 14,
       "enabled": true
@@ -136,7 +226,7 @@
     {
       "siteId": "SITE-SH-001",
       "spaceId": "A-16",
-      "cameraId": "CAM-04-A16",
+      "cameraId": "CAM-08",
       "chargerId": "CHG-08-02",
       "relayChannel": 15,
       "enabled": true

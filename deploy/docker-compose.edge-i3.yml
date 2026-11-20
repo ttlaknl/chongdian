@@ -75,6 +75,17 @@ services:
       VISION_RTSP_TRANSPORT: ${VISION_RTSP_TRANSPORT:-tcp}
       VISION_HEALTH_PORT: 8090
       VISION_CAMERAS_JSON: ${VISION_CAMERAS_JSON:-}
+      # OpenVINO 硬件加速与主子码流调度配置
+      OV_DEVICE: ${OV_DEVICE:-AUTO:GPU,CPU}
+      OV_NUM_STREAMS: ${OV_NUM_STREAMS:-2}
+      INFERENCE_BACKEND: ${INFERENCE_BACKEND:-openvino}
+      SUB_STREAM_FPS: ${SUB_STREAM_FPS:-1.0}
+      MAIN_BURST_FPS: ${MAIN_BURST_FPS:-4.0}
+      MAIN_BURST_MAX_SEC: ${MAIN_BURST_MAX_SEC:-12.0}
+      MAIN_STREAM_MODE: ${MAIN_STREAM_MODE:-grab_idle}
+    # 如需使用 Intel 核显 (iGPU) 硬件加速推理，取消下面两行注释（需宿主机存在 /dev/dri 并支持 OpenCL/VA-API）:
+    # devices:
+    #   - /dev/dri:/dev/dri
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8090/health || exit 1"]
       interval: 15s
@@ -83,7 +94,7 @@ services:
       start_period: 20s
     mem_limit: 3g
     cpus: 3.0
-    pids_limit: 128
+    pids_limit: 512
 
 volumes:
   edge_i3_data:

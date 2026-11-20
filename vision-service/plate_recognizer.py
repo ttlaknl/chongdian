@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 import json
-import re
 from collections import Counter, deque
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
-PROVINCE_CHARS = "京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼"
-STANDARD_PLATE_RE = re.compile(
-    rf"^[{PROVINCE_CHARS}][A-Z][A-HJ-NP-Z0-9]{{4}}[A-HJ-NP-Z0-9挂学警港澳]$"
-)
-NEV_PLATE_RE = re.compile(
-    rf"^[{PROVINCE_CHARS}][A-Z](?:[DF][A-HJ-NP-Z0-9]{{5}}|[A-HJ-NP-Z0-9]{{5}}[DF])$"
+import cv2
+import numpy as np
+
+from geometry import split_and_merge_double_plate, warp_plate_perspective
+from plate_postprocess import (
+    assess_plate_illumination,
+    enhance_backlit_plate,
+    is_valid_chinese_plate,
+    normalize_plate_text,
+    STANDARD_PLATE_RE,
+    NEV_PLATE_RE,
+    MILITARY_PLATE_RE,
+    WJ_PLATE_RE,
 )
 
 
@@ -25,6 +31,138 @@ class PlateDetection:
     plate_color: str
     vehicle_type: str
     confidence: float
+    # Milestone 2A metadata
+    laplacian_var: float = 0.0
+    plate_area: int = 0
+    warped: bool = False
+    enhanced: bool = False
+    mean_luma: float = 0.0
+    std_luma: float = 0.0
+
+
+def parse_plate_detection_output(
+    detection: dict[str, Any] | Sequence[float | int],
+    has_keypoints_mode: str = "auto",
+) -> dict[str, Any]:
+    """Parse plate detector output in either 4-corner keypoint or traditional 4-box bounding format.
+
+    Supports:
+    - Dict format: {'bbox': [...], 'confidence': ..., 'layer_type': ..., 'landmarks': [...]}
+    - Flat sequence: [x1, y1, x2, y2, conf, cls, x_tl, y_tl, x_tr, y_tr, x_br, y_br, x_bl, y_bl] (14+ items)
+    - Flat sequence: [x1, y1, x2, y2, conf, cls] (6 items)
+    - Flat sequence: [x1, y1, x2, y2, conf] (5 items)
+
+    Returns:
+        Standardized dict with bbox, confidence, layer_type, is_double_layer, landmarks, has_keypoints.
+    """
+    kpt_mode = str(has_keypoints_mode).strip().lower()
+
+    if isinstance(detection, dict):
+        raw_box = detection.get("bbox") or [0, 0, 0, 0]
+        bbox = [int(round(float(v))) for v in raw_box[:4]]
+        conf = float(detection.get("confidence", 0.0))
+        layer_type = int(detection.get("layer_type", 0))
+        raw_landmarks = detection.get("landmarks")
+    elif isinstance(detection, (list, tuple, np.ndarray)):
+        arr = [float(v) for v in detection]
+        bbox = [int(round(v)) for v in arr[:4]]
+        conf = float(arr[4]) if len(arr) >= 5 else 1.0
+        layer_type = int(arr[5]) if len(arr) >= 6 else 0
+        if len(arr) >= 14:
+            # 8 coordinates: [x_tl, y_tl, x_tr, y_tr, x_br, y_br, x_bl, y_bl]
+            raw_landmarks = [
+                [int(round(arr[6])), int(round(arr[7]))],
+                [int(round(arr[8])), int(round(arr[9]))],
+                [int(round(arr[10])), int(round(arr[11]))],
+                [int(round(arr[12])), int(round(arr[13]))],
+            ]
+        else:
+            raw_landmarks = None
+    else:
+        bbox = [0, 0, 0, 0]
+        conf = 0.0
+        layer_type = 0
+        raw_landmarks = None
+
+    # Aspect ratio & double layer determination
+    bw = max(1.0, float(bbox[2] - bbox[0]))
+    bh = max(1.0, float(bbox[3] - bbox[1]))
+    aspect_ratio = bw / bh
+    is_double = (layer_type == 1) or (aspect_ratio < 2.1)
+
+    # Keypoints handling
+    landmarks: list[list[int]] | None = None
+    if kpt_mode != "false" and raw_landmarks is not None and len(raw_landmarks) >= 4:
+        landmarks = [[int(pt[0]), int(pt[1])] for pt in raw_landmarks[:4]]
+
+    return {
+        "bbox": bbox,
+        "confidence": conf,
+        "layer_type": layer_type,
+        "is_double_layer": is_double,
+        "landmarks": landmarks,
+        "has_keypoints": landmarks is not None,
+    }
+
+
+def extract_plate_patch(
+    image: np.ndarray,
+    parsed_plate: dict[str, Any],
+    safe_pad_ratio: float = 0.04,
+    target_single: tuple[int, int] = (168, 48),
+    target_double: tuple[int, int] = (168, 96),
+) -> tuple[np.ndarray, bool]:
+    """Extract standard-sized rectified plate patch from image.
+
+    If 4 keypoints are present, uses perspective transform;
+    otherwise falls back to safe 4% padding horizontal box cropping and resize.
+
+    Returns:
+        (patch_image, was_warped)
+    """
+    if image is None or image.size == 0:
+        return np.zeros((target_single[1], target_single[0], 3), dtype=np.uint8), False
+
+    landmarks = parsed_plate.get("landmarks")
+    is_double = parsed_plate.get("is_double_layer", False)
+    ih, iw = image.shape[:2]
+
+    if landmarks is not None and len(landmarks) >= 4:
+        try:
+            warped = warp_plate_perspective(
+                image,
+                landmarks,
+                is_double_layer=is_double,
+                target_single=target_single,
+                target_double=target_double,
+            )
+            return warped, True
+        except Exception:
+            pass
+
+    # Traditional 4-box fallback: expand by safe_pad_ratio (4%)
+    x1, y1, x2, y2 = parsed_plate["bbox"]
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
+    dx = int(round(bw * safe_pad_ratio))
+    dy = int(round(bh * safe_pad_ratio))
+    px1 = max(0, x1 - dx)
+    py1 = max(0, y1 - dy)
+    px2 = min(iw, x2 + dx)
+    py2 = min(ih, y2 + dy)
+    crop = image[py1:py2, px1:px2]
+
+    if crop.size == 0:
+        crop = image[max(0, y1) : min(ih, y2), max(0, x1) : min(iw, x2)]
+
+    if crop.size == 0:
+        return np.zeros((target_single[1], target_single[0], 3), dtype=np.uint8), False
+
+    if is_double:
+        crop = split_and_merge_double_plate(crop)
+
+    resized = cv2.resize(crop, target_single, interpolation=cv2.INTER_LINEAR)
+    return resized, False
 
 
 @dataclass(frozen=True)
@@ -41,15 +179,7 @@ class VoteResult:
 
 def normalize_plate(raw: str | None) -> str:
     """Normalize whitespace, separators, and case for a plate string."""
-    if not raw:
-        return ""
-    return re.sub(r"[\s·\-•._]+", "", raw.strip()).upper()
-
-
-def is_valid_chinese_plate(raw: str | None) -> bool:
-    """Return True if the normalized text matches a valid 7-char or 8-char NEV Chinese plate."""
-    plate = normalize_plate(raw)
-    return bool(STANDARD_PLATE_RE.match(plate) or NEV_PLATE_RE.match(plate))
+    return normalize_plate_text(raw)
 
 
 def classify_plate(
@@ -60,7 +190,11 @@ def classify_plate(
     """Map HyperLPR3 plate type + plate regex structure into (plate_color, vehicle_type)."""
     plate = normalize_plate(raw_plate)
 
-    # 8-character EV plate format overrides ambiguous color detector outputs.
+    # 1. 军车与武警判定
+    if MILITARY_PLATE_RE.match(plate) or WJ_PLATE_RE.match(plate) or "警" in plate:
+        return ("WHITE", "SPECIAL_VEHICLE")
+
+    # 2. 8-character EV plate format overrides ambiguous color detector outputs.
     if plate and NEV_PLATE_RE.match(plate):
         return ("GREEN", "NEW_ENERGY")
 

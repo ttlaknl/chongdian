@@ -29,10 +29,7 @@ class VisionManager:
     def __init__(self, config: VisionConfig) -> None:
         self.config = config
         self.ai_engine = UnifiedAiEngine(
-            yolo_weights="weights/yolov8n.pt",
-            plate_detect_weights="weights/yolo26s-plate-detect.pt",
-            plate_rec_weights="weights/plate_rec_color.pth",
-            device="cpu",
+            config=config,
         )
         self._lock = threading.Lock()
         self._workers: dict[str, RtspCameraWorker] = {}
@@ -65,11 +62,22 @@ class VisionManager:
 
         def ingest(raw: dict[str, Any]) -> None:
             cam_id = str(raw.get("cameraId") or "").strip()
+            spaces_list = raw.get("spaces")
             space_id = str(raw.get("spaceId") or "").strip()
-            stream_url = str(raw.get("streamUrl") or "").strip()
+            if not space_id and isinstance(spaces_list, list) and len(spaces_list) > 0:
+                first_sp = spaces_list[0]
+                if isinstance(first_sp, dict):
+                    space_id = str(first_sp.get("spaceId") or "")
+            stream_url = str(raw.get("streamUrl") or raw.get("mainRtspUrl") or "").strip()
+            sub_stream_url = (
+                str(raw.get("subRtspUrl") or raw.get("subStreamUrl") or "").strip() or None
+            )
+            pre_entry_polygon = raw.get("preEntryPolygon") or raw.get("pre_entry_polygon")
             enabled = bool(raw.get("enabled", True))
             protocol = str(raw.get("protocol") or "RTSP").strip().upper()
-            roi_val = raw.get("roiJson")
+            roi_val = raw.get("roiJson") or raw.get("roi_json")
+            if not roi_val and isinstance(spaces_list, list):
+                roi_val = {"spaces": spaces_list}
             roi_json = (
                 json.dumps(roi_val, ensure_ascii=False)
                 if isinstance(roi_val, dict)
@@ -85,7 +93,9 @@ class VisionManager:
                 camera_id=cam_id,
                 protocol=protocol,
                 stream_url=stream_url,
+                sub_stream_url=sub_stream_url,
                 roi_json=roi_json,
+                pre_entry_polygon=pre_entry_polygon,
                 enabled=enabled,
             )
 

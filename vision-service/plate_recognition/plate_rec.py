@@ -1,6 +1,12 @@
-from plate_recognition.plateNet import myNet_ocr,myNet_ocr_color
-import torch
-import torch.nn as nn
+try:
+    from plate_recognition.plateNet import myNet_ocr, myNet_ocr_color
+    import torch
+    import torch.nn as nn
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device("cpu")
+except ImportError:
+    torch = None
+    nn = None
+    device = "cpu"
 import cv2
 import numpy as np
 import os
@@ -48,33 +54,38 @@ def image_processing(img,device):
     img = img.view(1, *img.size())
     return img
 
-def get_plate_result(img,device,model,is_color=False):
-    input = image_processing(img,device)
-    if is_color:  #是否识别颜色
-        preds,color_preds = model(input)
-        color_preds = torch.softmax(color_preds,dim=-1)
-        color_conf,color_index = torch.max(color_preds,dim=-1)
-        color_conf=color_conf.item()
+def get_plate_result(img, device, model, is_color=False):
+    input = image_processing(img, device)
+    if is_color:  # 是否识别颜色
+        preds, color_preds = model(input)
+        color_preds = torch.softmax(color_preds, dim=-1)
+        color_conf, color_index = torch.max(color_preds, dim=-1)
+        color_conf = color_conf.item()
+        plate_color = color[color_index]
     else:
         preds = model(input)
-    preds=torch.softmax(preds,dim=-1)
-    prob,index=preds.max(dim=-1)
+        plate_color = "未知"
+        color_conf = 0.0
+
+    preds = torch.softmax(preds, dim=-1)
+    prob, index = preds.max(dim=-1)
     index = index.view(-1).detach().cpu().numpy()
-    prob=prob.view(-1).detach().cpu().numpy()
-   
-    
-    # preds=preds.view(-1).detach().cpu().numpy()
-    newPreds,new_index=decodePlate(index)
-    prob=prob[new_index]
-    plate=""
+    prob = prob.view(-1).detach().cpu().numpy()
+
+    newPreds, new_index = decodePlate(index)
+    char_probs = prob[new_index]
+    plate = ""
     for i in newPreds:
-        plate+=plateName[i]
-    # if not (plate[0] in plateName[1:44] ):
-    #     return ""
-    if is_color:
-        return plate,prob,color[color_index],color_conf    #返回车牌号以及每个字符的概率,以及颜色，和颜色的概率
+        plate += plateName[i]
+
+    if len(char_probs) > 0:
+        ocr_avg_conf = float(np.mean(char_probs))
+        ocr_min_conf = float(np.min(char_probs))
     else:
-        return plate,prob
+        ocr_avg_conf = 0.0
+        ocr_min_conf = 0.0
+
+    return plate, plate_color, ocr_avg_conf, ocr_min_conf
 
 def init_model(device,model_path,is_color = False):
     # print( print(sys.path))
